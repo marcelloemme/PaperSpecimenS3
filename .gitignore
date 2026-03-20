@@ -1,0 +1,27 @@
+# PlatformIO
+.pio/
+.vscode/
+*.pyc
+
+# Build artifacts
+*.elf
+*.map
+
+# macOS
+.DS_Store
+._*
+
+# Backup files
+*~
+*.bak
+
+# Claude Code project files
+.claude.md
+.claude/
+
+# Serial output logs
+screenlog.*
+
+# Battery/debug logs on SD (not in repo)
+battery_log.txt
+wake_debug.txt

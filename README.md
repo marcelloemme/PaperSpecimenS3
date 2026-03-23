@@ -2,7 +2,6 @@
 
 A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType fonts from an SD card and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
 
-![Version](https://img.shields.io/badge/version-4.0.0-blue)
 
 ## Hardware
 

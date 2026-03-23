@@ -2186,7 +2186,6 @@ void wifiHandleRoot() {
 }
 
 void wifiHandleFonts() {
-    wifiLastActivity = millis();
     wifiSendCors();
     String json = "[";
     File dir = SD.open("/fonts");
@@ -2212,7 +2211,6 @@ void wifiHandleFonts() {
 }
 
 void wifiHandleDelete() {
-    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     // Simple JSON parse for {"name":"filename"}
     String body = wifiServer.arg("plain");
@@ -2232,7 +2230,6 @@ void wifiHandleDelete() {
 }
 
 void wifiHandleRename() {
-    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     String body = wifiServer.arg("plain");
     // Parse {"name":"old","newName":"new"}
@@ -2383,6 +2380,9 @@ void runWiFiFontManager() {
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.display();
     M5.Display.waitDisplay();
+
+    // Disable touch — interaction is via browser only
+    M5.Touch.end();
 
     // Run server loop until timeout or user confirms
     wifiLastActivity = millis();

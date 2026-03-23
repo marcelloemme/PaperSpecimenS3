@@ -196,20 +196,30 @@ async function applyChanges() {
   ov.classList.add('active');
 
   try {
-    for (let f of fonts.filter(f => f.status === 'delete')) {
-      txt.textContent = 'Deleting ' + f.name + '...';
+    let deletes = fonts.filter(f => f.status === 'delete');
+    let renames = fonts.filter(f => f.status === 'rename');
+    let uploads = fonts.filter(f => f.status === 'new');
+    let total = deletes.length + renames.length + uploads.length;
+    let done = 0;
+
+    for (let f of deletes) {
+      done++;
+      txt.textContent = '(' + done + '/' + total + ') Deleting ' + f.name + '...';
       await fetch('/api/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name:f.name}) });
     }
-    for (let f of fonts.filter(f => f.status === 'rename')) {
-      txt.textContent = 'Renaming ' + f.name + '...';
+    for (let f of renames) {
+      done++;
+      txt.textContent = '(' + done + '/' + total + ') Renaming ' + f.name + '...';
       await fetch('/api/rename', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name:f.name, newName:f.newName}) });
     }
-    for (let f of fonts.filter(f => f.status === 'new')) {
-      txt.textContent = 'Uploading ' + f.name + '...';
+    for (let f of uploads) {
+      done++;
+      let sizeMB = (f.size / 1048576).toFixed(1);
+      txt.textContent = '(' + done + '/' + total + ') Uploading ' + f.name + ' (' + sizeMB + ' MB)...';
       let fd = new FormData(); fd.append('file', f.file);
       await fetch('/api/upload', { method: 'POST', body: fd });
     }
-    txt.textContent = 'Restarting device...';
+    txt.textContent = 'All done! Restarting device...';
     await fetch('/api/apply').catch(() => {});
     await new Promise(r => setTimeout(r, 1000));
     document.body.innerHTML = '<h1>Done</h1><p>Changes applied. The device is restarting. You can close this page.</p>';

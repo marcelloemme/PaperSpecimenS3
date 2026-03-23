@@ -1264,16 +1264,17 @@ void renderSetupScreen(int fontPage) {
                    + 3              // unicode + flip + wifi manager
                    + 1;             // confirm
     int totalGaps = 4; // after timer radios, after standby, after fonts, before confirm
-    int totalContentH = totalLines * UI_LINE_H + totalGaps * UI_PAD;
+    int textH = 16; // actual text height at textSize 2, Font0
+    // Last line only needs textH, not full UI_LINE_H
+    int totalContentH = (totalLines - 1) * UI_LINE_H + textH + totalGaps * UI_PAD;
 
     // Title at top (fixed), version at bottom (fixed)
-    int titleH = 16;
     int titleY = UI_PAD;
     int versionY = displayH - UI_PAD;
 
-    // Usable area between title bottom and version top
-    int areaTop = titleY + titleH;
-    int areaBot = versionY - titleH; // version is bottom-aligned, so its top is ~here
+    // Usable area between title text bottom and version text top
+    int areaTop = titleY + textH;
+    int areaBot = versionY - textH; // version drawn with bottom_center, so top is textH above
     int areaH = areaBot - areaTop;
 
     // Center content vertically: equal gap above and below
@@ -1440,15 +1441,15 @@ void renderFontsScreen(int page) {
     if (leftX < UI_LEFT) leftX = UI_LEFT;
 
     int fontsOnPage = endF - startF;
+    int textH = 16;
     int navLineH = (totalPages > 1) ? (UI_LINE_H + UI_PAD) : 0;
-    int backLineH = UI_PAD + UI_LINE_H;
-    int totalContentH = navLineH + fontsOnPage * UI_LINE_H + backLineH;
+    int backLineH = UI_PAD + textH; // last line only needs textH
+    int totalContentH = navLineH + (fontsOnPage > 0 ? (fontsOnPage - 1) * UI_LINE_H + textH : 0) + backLineH;
 
-    int titleH = 16;
     int titleY = UI_PAD;
     int versionY = displayH - UI_PAD;
-    int areaTop = titleY + titleH;
-    int areaBot = versionY - titleH;
+    int areaTop = titleY + textH;
+    int areaBot = versionY - textH;
     int areaH = areaBot - areaTop;
     int gap = (areaH - totalContentH) / 2;
     if (gap < UI_PAD) gap = UI_PAD;
@@ -1555,15 +1556,15 @@ void renderRangesScreen(int rangePage) {
     // -- Calculate total content height for vertical centering --
     // Order: [page nav] + ranges + [back/select]
     int rangesOnPage = endR - startR;
+    int textH = 16;
     int navLineH = (totalPages > 1) ? (UI_LINE_H + UI_PAD) : 0; // nav line + gap after
-    int backLineH = UI_PAD + UI_LINE_H; // gap before + back/select line
-    int totalContentH = navLineH + rangesOnPage * UI_LINE_H + backLineH;
+    int backLineH = UI_PAD + textH; // gap before + last line only needs textH
+    int totalContentH = navLineH + (rangesOnPage > 0 ? (rangesOnPage - 1) * UI_LINE_H + textH : 0) + backLineH;
 
-    int titleH = 16;
     int titleY = UI_PAD;
     int versionY = displayH - UI_PAD;
-    int areaTop = titleY + titleH;
-    int areaBot = versionY - titleH;
+    int areaTop = titleY + textH;
+    int areaBot = versionY - textH;
     int areaH = areaBot - areaTop;
     int gap = (areaH - totalContentH) / 2;
     if (gap < UI_PAD) gap = UI_PAD;
@@ -2173,6 +2174,7 @@ static const char* WIFI_PASS = "seriforsans";
 static WebServer wifiServer(80);
 static DNSServer dnsServer;
 static bool wifiManagerDone = false;
+static unsigned long wifiLastActivity = 0; // reset on each API call to extend timeout
 
 void wifiSendCors() {
     wifiServer.sendHeader("Access-Control-Allow-Origin", "*");
@@ -2184,6 +2186,7 @@ void wifiHandleRoot() {
 }
 
 void wifiHandleFonts() {
+    wifiLastActivity = millis();
     wifiSendCors();
     String json = "[";
     File dir = SD.open("/fonts");
@@ -2209,6 +2212,7 @@ void wifiHandleFonts() {
 }
 
 void wifiHandleDelete() {
+    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     // Simple JSON parse for {"name":"filename"}
     String body = wifiServer.arg("plain");
@@ -2228,6 +2232,7 @@ void wifiHandleDelete() {
 }
 
 void wifiHandleRename() {
+    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     String body = wifiServer.arg("plain");
     // Parse {"name":"old","newName":"new"}
@@ -2251,6 +2256,7 @@ void wifiHandleRename() {
 }
 
 void wifiHandleUpload() {
+    wifiLastActivity = millis(); // reset on each chunk
     HTTPUpload& upload = wifiServer.upload();
     static File uploadFile;
 
@@ -2341,9 +2347,11 @@ void runWiFiFontManager() {
     // Content: timer line + blank + SSID label + SSID + blank + Pass label + Pass + blank + URL label + URL + fallback
     int lineH = 30;
     int gapH = 20;
-    int contentH = lineH * 8 + gapH * 3; // 8 text lines + 3 gaps
-    int titleBottom = UI_PAD + 16;
-    int versionTop = displayH - UI_PAD - 16;
+    int textH = 16; // actual text height at textSize 2, Font0
+    // 7 gaps between 8 lines + 3 extra gaps between groups + last line is just textH
+    int contentH = lineH * 7 + textH + gapH * 3;
+    int titleBottom = UI_PAD + textH;
+    int versionTop = displayH - UI_PAD - textH;
     int areaH = versionTop - titleBottom;
     int startY = titleBottom + (areaH - contentH) / 2;
 
@@ -2377,18 +2385,19 @@ void runWiFiFontManager() {
     M5.Display.waitDisplay();
 
     // Run server loop until timeout or user confirms
+    wifiLastActivity = millis();
     unsigned long startMs = millis();
     wifiManagerDone = false;
     int lastDisplayedSecond = -1;
     int fullRefreshCounter = 0;
 
-    Serial.printf("WiFi manager active — %ds timeout\n", WIFI_TIMEOUT_MS / 1000);
-    while (!wifiManagerDone && (millis() - startMs < WIFI_TIMEOUT_MS)) {
+    Serial.printf("WiFi manager active — %ds inactivity timeout\n", WIFI_TIMEOUT_MS / 1000);
+    while (!wifiManagerDone && (millis() - wifiLastActivity < WIFI_TIMEOUT_MS)) {
         dnsServer.processNextRequest();
         wifiServer.handleClient();
 
-        // Update countdown on e-ink every second
-        int elapsed = (millis() - startMs) / 1000;
+        // Update countdown on e-ink every second (based on last activity)
+        int elapsed = (millis() - wifiLastActivity) / 1000;
         int remaining = (WIFI_TIMEOUT_MS / 1000) - elapsed;
         if (remaining < 0) remaining = 0;
 
@@ -2399,17 +2408,34 @@ void runWiFiFontManager() {
             char timerStr[48];
             snprintf(timerStr, sizeof(timerStr), "WiFi Font Manager - %dm %02ds", mins, secs);
 
-            // Clear timer area and redraw
-            M5.Display.fillRect(0, timerY, displayW, lineH, TFT_WHITE);
-            M5.Display.setTextDatum(top_center);
-            M5.Display.drawString(timerStr, cx, timerY);
-
-            // Every 10s use epd_text for cleaner refresh, otherwise epd_fastest
+            // epd_fastest every second, full refresh every 60s
             fullRefreshCounter++;
-            if (fullRefreshCounter >= 10) {
-                M5.Display.setEpdMode(epd_mode_t::epd_text);
-                fullRefreshCounter = 0;
+            bool doFullRefresh = (fullRefreshCounter >= 60);
+            if (doFullRefresh) fullRefreshCounter = 0;
+
+            if (doFullRefresh) {
+                // Redraw entire screen for clean full refresh
+                M5.Display.fillScreen(TFT_WHITE);
+                M5.Display.setTextDatum(top_center);
+                M5.Display.drawString("PaperSpecimen S3", cx, UI_PAD);
+                M5.Display.setTextDatum(bottom_center);
+                M5.Display.drawString(VERSION, cx, displayH - UI_PAD);
+                M5.Display.setTextDatum(top_center);
+                M5.Display.drawString(timerStr, cx, timerY);
+                int ry = timerY + lineH + gapH;
+                M5.Display.drawString("SSID:", cx, ry); ry += lineH;
+                M5.Display.drawString(WIFI_SSID, cx, ry); ry += lineH + gapH;
+                M5.Display.drawString("Password:", cx, ry); ry += lineH;
+                M5.Display.drawString(WIFI_PASS, cx, ry); ry += lineH + gapH;
+                M5.Display.drawString("Open in browser:", cx, ry); ry += lineH;
+                M5.Display.drawString("paperspecimen.local", cx, ry); ry += lineH;
+                M5.Display.drawString(ipStr, cx, ry);
+                M5.Display.setEpdMode(epd_mode_t::epd_quality);
             } else {
+                // Just update timer area
+                M5.Display.fillRect(0, timerY, displayW, lineH, TFT_WHITE);
+                M5.Display.setTextDatum(top_center);
+                M5.Display.drawString(timerStr, cx, timerY);
                 M5.Display.setEpdMode(epd_mode_t::epd_fastest);
             }
             M5.Display.display();

@@ -13,8 +13,8 @@
 #include FT_OUTLINE_H
 #include FT_BBOX_H
 
-// PaperSpecimen S3 - v3.4.1
-static const char* VERSION = "v3.4.1";
+// PaperSpecimen S3 - v3.4.2
+static const char* VERSION = "v3.4.2";
 
 // M5PaperS3 SD Card SPI pins
 #define SD_SPI_CS_PIN   47
@@ -828,11 +828,11 @@ void drawGlyphOutline(uint32_t charcode) {
         OutlinePoint& pt = g_outline_points[i];
         if (pt.is_control) {
             // Off-curve: hollow circle (anti-aliased outer, white inner)
-            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 5, colorConstruct);
-            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 4, TFT_WHITE);
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 4, colorConstruct);
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 3, TFT_WHITE);
         } else {
             // On-curve: filled circle (anti-aliased)
-            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 5, colorConstruct);
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 4, colorConstruct);
         }
     }
 

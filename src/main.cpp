@@ -13,8 +13,8 @@
 #include FT_OUTLINE_H
 #include FT_BBOX_H
 
-// PaperSpecimen S3 - v0.4.0 (Config UI + Unicode Ranges)
-static const char* VERSION = "v0.4.0";
+// PaperSpecimen S3 - v3.4.1
+static const char* VERSION = "v3.4.1";
 
 // M5PaperS3 SD Card SPI pins
 #define SD_SPI_CS_PIN   47
@@ -28,12 +28,11 @@ static const char* VERSION = "v0.4.0";
 #define LABEL_PIXEL_SIZE 24
 // Uniform padding for UI and glyph labels
 #define UI_PAD       30
-
 // Config file path
 #define CONFIG_FILE "/paperspecimen.cfg"
 
 // Max fonts (used by config and font list)
-#define MAX_FONTS 32
+#define MAX_FONTS 100
 
 // ---- Unicode ranges (same 28 as original PaperSpecimen) ----
 
@@ -89,10 +88,11 @@ static uint32_t currentCodepoint = 'A';
 struct AppConfig {
     uint8_t wakeIntervalMinutes;       // 5, 10, or 15
     bool allowDifferentFont;           // Random font on wake
-    bool allowDifferentMode;           // Random mode on wake
+    bool allowDifferentMode;           // Random mode (bitmap/outline) on wake
     bool isDebugMode;                  // Debug mode (persisted across wakes)
+    bool flipInterface;                // Rotate display 180° (for lanyard use)
     bool fontEnabled[MAX_FONTS];       // Per-font enable
-    bool rangeEnabled[28];             // Per-range enable
+    bool rangeEnabled[NUM_GLYPH_RANGES]; // Per-range enable
 };
 
 static AppConfig config;
@@ -102,8 +102,9 @@ static AppConfig config;
 void initDefaultConfig() {
     config.wakeIntervalMinutes = 15;
     config.allowDifferentFont = true;
-    config.isDebugMode = false;
     config.allowDifferentMode = true;
+    config.isDebugMode = false;
+    config.flipInterface = false;
     for (int i = 0; i < MAX_FONTS; i++) config.fontEnabled[i] = true;
     for (int i = 0; i < NUM_GLYPH_RANGES; i++) config.rangeEnabled[i] = (i < 6);
 }
@@ -128,6 +129,8 @@ bool loadConfig() {
     config.allowDifferentMode = (line == "1");
     line = f.readStringUntil('\n'); line.trim();
     config.isDebugMode = (line == "1");
+    line = f.readStringUntil('\n'); line.trim();
+    config.flipInterface = (line == "1");
 
     // Font flags until "---"
     int fi = 0;
@@ -160,6 +163,7 @@ bool saveConfig() {
     f.println(config.allowDifferentFont ? "1" : "0");
     f.println(config.allowDifferentMode ? "1" : "0");
     f.println(config.isDebugMode ? "1" : "0");
+    f.println(config.flipInterface ? "1" : "0");
 
     for (int i = 0; i < fontCount; i++)
         f.println(config.fontEnabled[i] ? "1" : "0");
@@ -210,8 +214,8 @@ static float batteryPct = 100.0;  // updated at every boot
 
 // ---- Outline data structures ----
 
-#define MAX_OUTLINE_POINTS 200
-#define MAX_OUTLINE_SEGMENTS 200
+#define MAX_OUTLINE_POINTS 600
+#define MAX_OUTLINE_SEGMENTS 600
 
 struct OutlinePoint {
     float x, y;
@@ -247,8 +251,8 @@ struct OutlineDecomposeContext {
 
 bool isValidFontFile(const char* name) {
     String n = String(name);
-    // Skip macOS resource fork files (._filename)
-    if (n.startsWith("._")) return false;
+    // Skip macOS hidden/resource fork files (._xxx, .DS_Store, etc.)
+    if (n.startsWith(".")) return false;
     n.toLowerCase();
     return n.endsWith(".ttf") || n.endsWith(".otf");
 }
@@ -409,6 +413,7 @@ void drawFTString(const char* text, int cx, int y, int pixSize, bool bottomAlign
     FT_Set_Pixel_Sizes(ftFace, 0, pixSize);
 
     // First pass: measure total width and max ascent/descent
+    // Use FT_LOAD_RENDER directly — gives both advance and bitmap metrics in one call
     int totalWidth = 0;
     int maxAscent = 0;
     int maxDescent = 0;
@@ -417,10 +422,8 @@ void drawFTString(const char* text, int cx, int y, int pixSize, bool bottomAlign
         if (idx == 0) idx = FT_Get_Char_Index(ftFace, '?');
         if (idx == 0) continue;
 
-        FT_Load_Glyph(ftFace, idx, FT_LOAD_DEFAULT);
-        totalWidth += ftFace->glyph->advance.x >> 6;
-
         FT_Load_Glyph(ftFace, idx, FT_LOAD_RENDER);
+        totalWidth += ftFace->glyph->advance.x >> 6;
         int asc = ftFace->glyph->bitmap_top;
         int desc = (int)ftFace->glyph->bitmap.rows - ftFace->glyph->bitmap_top;
         if (asc > maxAscent) maxAscent = asc;
@@ -436,42 +439,68 @@ void drawFTString(const char* text, int cx, int y, int pixSize, bool bottomAlign
         baselineY = y + maxAscent;
     }
 
-    // Second pass: render
-    int penX = startX;
-    for (const char* p = text; *p; p++) {
-        FT_UInt idx = FT_Get_Char_Index(ftFace, (uint8_t)*p);
-        if (idx == 0) idx = FT_Get_Char_Index(ftFace, '?');
-        if (idx == 0) { penX += pixSize / 2; continue; }
+    // Second pass: render using pushGrayscaleImage per character
+    {
+        int penX = startX;
+        for (const char* p = text; *p; p++) {
+            FT_UInt idx = FT_Get_Char_Index(ftFace, (uint8_t)*p);
+            if (idx == 0) idx = FT_Get_Char_Index(ftFace, '?');
+            if (idx == 0) { penX += pixSize / 2; continue; }
 
-        FT_Load_Glyph(ftFace, idx, FT_LOAD_RENDER);
-        FT_GlyphSlot slot = ftFace->glyph;
-        FT_Bitmap* bmp = &slot->bitmap;
+            FT_Load_Glyph(ftFace, idx, FT_LOAD_RENDER);
+            FT_GlyphSlot slot = ftFace->glyph;
+            FT_Bitmap* bmp = &slot->bitmap;
+            int bx = penX + slot->bitmap_left;
+            int by = baselineY - slot->bitmap_top;
 
-        int bx = penX + slot->bitmap_left;
-        int by = baselineY - slot->bitmap_top;
+            if (bmp->width > 0 && bmp->rows > 0) {
+                // Clamp to display bounds
+                int sx = 0, sy = 0;
+                int dx = bx, dy = by;
+                int w = (int)bmp->width, h = (int)bmp->rows;
+                if (dx < 0) { sx = -dx; w += dx; dx = 0; }
+                if (dy < 0) { sy = -dy; h += dy; dy = 0; }
+                if (dx + w > displayW) w = displayW - dx;
+                if (dy + h > displayH) h = displayH - dy;
 
-        for (unsigned int row = 0; row < bmp->rows; row++) {
-            for (unsigned int col = 0; col < bmp->width; col++) {
-                uint8_t alpha = bmp->buffer[row * bmp->pitch + col];
-                if (alpha > 0) {
-                    uint8_t gray = 255 - alpha;
-                    int px = bx + col;
-                    int py = by + row;
-                    if (px >= 0 && px < displayW && py >= 0 && py < displayH) {
-                        M5.Display.drawPixel(px, py,
-                            M5.Display.color565(gray, gray, gray));
+                if (w > 0 && h > 0) {
+                    if (sx == 0 && sy == 0 && w == (int)bmp->width && bmp->pitch == (int)bmp->width) {
+                        M5.Display.pushGrayscaleImage(dx, dy, w, h,
+                            bmp->buffer, lgfx::color_depth_t::grayscale_8bit, TFT_BLACK, TFT_WHITE);
+                    } else {
+                        // Copy clipped region into contiguous buffer
+                        uint8_t* buf = (uint8_t*)malloc(w * h);
+                        if (buf) {
+                            for (int row = 0; row < h; row++) {
+                                memcpy(&buf[row * w],
+                                       &bmp->buffer[(sy + row) * bmp->pitch + sx], w);
+                            }
+                            M5.Display.pushGrayscaleImage(dx, dy, w, h,
+                                buf, lgfx::color_depth_t::grayscale_8bit, TFT_BLACK, TFT_WHITE);
+                            free(buf);
+                        }
                     }
                 }
             }
+            penX += slot->advance.x >> 6;
         }
-
-        penX += slot->advance.x >> 6;
     }
 }
 
-// Forward declarations
+// Forward declaration
 void refreshDisplay();
-uint32_t findRandomGlyph();
+
+// Check if a glyph has visible content (non-blank bitmap)
+// Returns true if the glyph exists AND has non-zero bitmap dimensions
+bool isGlyphVisible(uint32_t charcode) {
+    if (!ftFace) return false;
+    FT_UInt idx = FT_Get_Char_Index(ftFace, charcode);
+    if (idx == 0) return false;
+    // Load outline only (no rasterization) — check if glyph has contour points
+    FT_Error err = FT_Load_Glyph(ftFace, idx, FT_LOAD_NO_SCALE);
+    if (err) return false;
+    return (ftFace->glyph->outline.n_points > 0);
+}
 
 // ---- Outline decompose callbacks ----
 
@@ -674,10 +703,50 @@ void drawDashedLine(float x1, float y1, float x2, float y2, uint16_t color) {
     }
 }
 
+// Flag to track if display is sleeping (only in glyph mode, not setup)
+static bool displaySleeping = false;
+
+// Wake the display controller if it was sleeping
+void wakeDisplay() {
+    if (displaySleeping) {
+        M5.Display.wakeup();
+        displaySleeping = false;
+    }
+}
+
+// Put the display controller to sleep (image stays visible, saves ~5-10mA)
+void sleepDisplay() {
+    M5.Display.waitDisplay();
+    M5.Display.sleep();
+    displaySleeping = true;
+}
+
+// Delayed display sleep: sleep 3s after the last FULL refresh only
+#define DISPLAY_SLEEP_DELAY_MS 3000
+static unsigned long lastFullRefreshDone = 0;
+
+// ---- Shared label drawing (font name top, codepoint bottom) ----
+
+void drawLabels(uint32_t charcode) {
+    int labelMaxW = displayW - 2 * UI_PAD;
+    String displayName = shortenFTText(fontNames[currentFontIndex], labelMaxW, LABEL_PIXEL_SIZE);
+    drawFTString(displayName.c_str(),
+                 displayW / 2, UI_PAD, LABEL_PIXEL_SIZE, false);
+
+    char cpBuf[32];
+    if (debugMode) {
+        snprintf(cpBuf, sizeof(cpBuf), "U+%04X - %.0f%%", charcode, batteryPct);
+    } else {
+        snprintf(cpBuf, sizeof(cpBuf), "U+%04X", charcode);
+    }
+    drawFTString(cpBuf, displayW / 2, displayH - UI_PAD, LABEL_PIXEL_SIZE, true);
+}
+
 // ---- Outline rendering ----
 
 void drawGlyphOutline(uint32_t charcode) {
     if (!ftFace) return;
+    wakeDisplay();
 
     FT_UInt glyphIndex = FT_Get_Char_Index(ftFace, charcode);
     if (glyphIndex == 0) {
@@ -754,29 +823,20 @@ void drawGlyphOutline(uint32_t charcode) {
         }
     }
 
-    // Draw points
+    // Draw points (10px diameter, anti-aliased)
     for (int i = 0; i < g_num_points; i++) {
         OutlinePoint& pt = g_outline_points[i];
         if (pt.is_control) {
-            // Off-curve: hollow circle (black outer, white inner)
-            M5.Display.fillCircle((int)pt.x, (int)pt.y, 4, colorConstruct);
-            M5.Display.fillCircle((int)pt.x, (int)pt.y, 3, TFT_WHITE);
+            // Off-curve: hollow circle (anti-aliased outer, white inner)
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 5, colorConstruct);
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 4, TFT_WHITE);
         } else {
-            // On-curve: filled black circle
-            M5.Display.fillCircle((int)pt.x, (int)pt.y, 4, colorConstruct);
+            // On-curve: filled circle (anti-aliased)
+            M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 5, colorConstruct);
         }
     }
 
-    // Labels (shorten font name if needed to fit display width)
-    int labelMaxW = displayW - 2 * UI_PAD;
-    String displayName = shortenFTText(fontNames[currentFontIndex], labelMaxW, LABEL_PIXEL_SIZE);
-    drawFTString(displayName.c_str(),
-                 displayW / 2, UI_PAD, LABEL_PIXEL_SIZE, false);
-
-    char cpBuf[16];
-    snprintf(cpBuf, sizeof(cpBuf), "U+%04X", charcode);
-    drawFTString(cpBuf, displayW / 2, displayH - UI_PAD, LABEL_PIXEL_SIZE, true);
-
+    drawLabels(charcode);
     refreshDisplay();
     currentCodepoint = charcode;
 }
@@ -793,6 +853,7 @@ void refreshDisplay() {
         partialRefreshCount = 0;
         hasPartialSinceLastFull = false;
         lastFullRefreshTime = millis();
+        lastFullRefreshDone = millis();
         return;
     }
 
@@ -818,6 +879,7 @@ void refreshDisplay() {
         partialRefreshCount = 0;
         hasPartialSinceLastFull = false;
         lastFullRefreshTime = millis();
+        lastFullRefreshDone = millis();
     } else {
         // Partial refresh with epd_text (preserves 16-level grayscale anti-aliasing)
         // epd_fast/epd_fastest reduce to black/white only - no good for font rendering
@@ -838,6 +900,7 @@ void refreshDisplay() {
 
 void drawGlyph(uint32_t charcode) {
     if (!ftFace) return;
+    wakeDisplay();
 
     FT_UInt glyphIndex = FT_Get_Char_Index(ftFace, charcode);
     if (glyphIndex == 0) {
@@ -870,33 +933,51 @@ void drawGlyph(uint32_t charcode) {
     int drawX = (displayW - (int)bmp->width) / 2;
     int drawY = (displayH - (int)bmp->rows) / 2;
 
-    // Draw glyph bitmap with grayscale anti-aliasing
-    for (unsigned int row = 0; row < bmp->rows; row++) {
-        for (unsigned int col = 0; col < bmp->width; col++) {
-            uint8_t alpha = bmp->buffer[row * bmp->pitch + col];
-            if (alpha > 0) {
-                uint8_t gray = 255 - alpha;
-                int px = drawX + col;
-                int py = drawY + row;
-                if (px >= 0 && px < displayW && py >= 0 && py < displayH) {
-                    M5.Display.drawPixel(px, py,
-                        M5.Display.color565(gray, gray, gray));
+    // Clamp to display bounds
+    int srcX = 0, srcY = 0;
+    int w = (int)bmp->width, h = (int)bmp->rows;
+    if (drawX < 0) { srcX = -drawX; w += drawX; drawX = 0; }
+    if (drawY < 0) { srcY = -drawY; h += drawY; drawY = 0; }
+    if (drawX + w > displayW) w = displayW - drawX;
+    if (drawY + h > displayH) h = displayH - drawY;
+
+    if (w > 0 && h > 0) {
+        // Use pushGrayscaleImage for efficient bulk rendering
+        // FreeType bitmap is 8-bit alpha (0=transparent, 255=opaque)
+        // pushGrayscaleImage maps values between forecolor (black) and backcolor (white)
+        // We need a contiguous w*h buffer (no pitch gaps, no clipping offsets)
+        if (srcX == 0 && srcY == 0 && w == (int)bmp->width && bmp->pitch == (int)bmp->width) {
+            // Perfect case: buffer is already contiguous
+            M5.Display.pushGrayscaleImage(drawX, drawY, w, h,
+                bmp->buffer, lgfx::color_depth_t::grayscale_8bit, TFT_BLACK, TFT_WHITE);
+        } else {
+            // Need to copy into contiguous buffer (pitch != width, or clipping active)
+            uint8_t* buf = (uint8_t*)ps_malloc(w * h);
+            if (buf) {
+                for (int row = 0; row < h; row++) {
+                    memcpy(&buf[row * w],
+                           &bmp->buffer[(srcY + row) * bmp->pitch + srcX], w);
+                }
+                M5.Display.pushGrayscaleImage(drawX, drawY, w, h,
+                    buf, lgfx::color_depth_t::grayscale_8bit, TFT_BLACK, TFT_WHITE);
+                free(buf);
+            } else {
+                // Fallback to pixel-by-pixel if PSRAM allocation fails
+                for (int row = 0; row < h; row++) {
+                    for (int col = 0; col < w; col++) {
+                        uint8_t alpha = bmp->buffer[(srcY + row) * bmp->pitch + (srcX + col)];
+                        if (alpha > 0) {
+                            uint8_t gray = 255 - alpha;
+                            M5.Display.drawPixel(drawX + col, drawY + row,
+                                M5.Display.color565(gray, gray, gray));
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Draw labels using the current font at 24px (like original PaperSpecimen)
-    // Font name at top (shorten if needed)
-    int labelMaxW = displayW - 2 * UI_PAD;
-    String displayName = shortenFTText(fontNames[currentFontIndex], labelMaxW, LABEL_PIXEL_SIZE);
-    drawFTString(displayName.c_str(),
-                 displayW / 2, UI_PAD, LABEL_PIXEL_SIZE, false);
-
-    // Codepoint at bottom
-    char cpBuf[16];
-    snprintf(cpBuf, sizeof(cpBuf), "U+%04X", charcode);
-    drawFTString(cpBuf, displayW / 2, displayH - UI_PAD, LABEL_PIXEL_SIZE, true);
+    drawLabels(charcode);
 
     // Refresh with smart management
     refreshDisplay();
@@ -905,9 +986,9 @@ void drawGlyph(uint32_t charcode) {
 
 // ---- Setup UI ----
 
-// UI layout (960x540 landscape, single column, Font0 textSize 2)
+// UI layout (540x960 portrait, single column, Font0 textSize 2)
 // 20px uniform spacing between all groups, 20px top/bottom padding
-#define UI_LINE_H    36  // line height for items (text is 16px, rest is touch area)
+#define UI_LINE_H    38  // line height for items (text is 16px, rest is touch area)
 #define UI_LEFT      30
 
 // Setup refresh tracking (reuses same constants as main refresh logic)
@@ -917,23 +998,30 @@ static unsigned long setupLastFullTime = 0;
 static unsigned long setupFirstPartialTime = 0;
 static bool setupHasPartial = false;
 
-// Common setup for all UI screens
-void uiBeginScreen(const char* title) {
+// Apply display rotation based on flip config
+void applyRotation() {
+    M5.Display.setRotation(config.flipInterface ? 2 : 0);
+}
+
+// Get touch coordinates adjusted for flip
+// GT911 always reports physical coords; when display is rotated 180°,
+// we must invert them to match the rotated display
+void adjustTouch(int &x, int &y) {
+    if (config.flipInterface) {
+        x = displayW - 1 - x;
+        y = displayH - 1 - y;
+    }
+}
+
+// Common setup for all UI screens — clears and sets font, but no title/version
+void uiBeginScreen() {
     M5.Display.fillScreen(TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     M5.Display.setTextSize(2);
     M5.Display.setFont(&fonts::Font0);
-
-    // Header
-    M5.Display.setTextDatum(top_center);
-    M5.Display.drawString(title, displayW / 2, UI_PAD);
-
-    // Footer
-    M5.Display.setTextDatum(bottom_center);
-    M5.Display.drawString(VERSION, displayW / 2, displayH - UI_PAD);
-
     M5.Display.setTextDatum(top_left);
 }
+
 
 void uiFlush() {
     if (setupFirstRender) {
@@ -1027,11 +1115,10 @@ String shortenText(const String& text, int maxWidth) {
 //   (*) FontName2
 //   ...
 
-// Track Y positions of each item for hit testing
+// Track touch areas for hit testing
 #define MAX_UI_ITEMS 20
 struct UiItem {
-    int y;
-    int h;
+    int x, y, w, h;
     int id; // action identifier
 };
 static UiItem uiItems[MAX_UI_ITEMS];
@@ -1047,20 +1134,31 @@ static int uiItemCount = 0;
 #define ID_DIFF_FONT     20
 #define ID_DIFF_MODE     21
 #define ID_UNICODE_LINK  30
+#define ID_FLIP          31
 #define ID_FONT_SELALL   40
 #define ID_FONT_BASE     100   // 100 + fontIndex
 #define ID_FONT_PREV     200
 #define ID_FONT_NEXT     201
+#define ID_FONTS_LINK    202   // "> Fonts" link in main setup (>20 fonts)
 
+// Full-width item (touches anywhere on that row)
 void addUiItem(int y, int h, int id) {
     if (uiItemCount < MAX_UI_ITEMS) {
-        uiItems[uiItemCount++] = {y, h, id};
+        uiItems[uiItemCount++] = {0, y, displayW, h, id}; // full display width
     }
 }
 
-int hitTestUi(int ty) {
+// Item with specific X range (for left/right buttons on same row)
+void addUiItemX(int x, int y, int w, int h, int id) {
+    if (uiItemCount < MAX_UI_ITEMS) {
+        uiItems[uiItemCount++] = {x, y, w, h, id};
+    }
+}
+
+int hitTestUi(int tx, int ty) {
     for (int i = 0; i < uiItemCount; i++) {
-        if (ty >= uiItems[i].y && ty < uiItems[i].y + uiItems[i].h)
+        if (tx >= uiItems[i].x && tx < uiItems[i].x + uiItems[i].w &&
+            ty >= uiItems[i].y && ty < uiItems[i].y + uiItems[i].h)
             return uiItems[i].id;
     }
     return 0;
@@ -1096,44 +1194,37 @@ void renderSetupScreen(int fontPage) {
     w = uiTextWidth("(*) Allow different font"); if (w > maxW) maxW = w;
     w = uiTextWidth("(*) Allow different mode"); if (w > maxW) maxW = w;
 
-    // Fonts header (indented label + "> Deselect all" on right, measured as full line)
-    w = uiTextWidth("Fonts:  > Deselect all"); if (w > maxW) maxW = w;
+    // Fonts: if >20 fonts, show as link; otherwise show inline with pagination
+    #define FONTS_INLINE_MAX 20
+    #define MAX_FONTS_NO_PAGE 5
+    #define FONTS_PER_PAGE 4
+    bool fontsInline = (fontCount <= FONTS_INLINE_MAX);
+    int fontsPerPage = 0, totalPages = 1, startFont = 0, endFont = 0;
+    int maxTextW = displayW - 2 * UI_LEFT;
 
-    // Calculate pagination based on available vertical space
-    // Usable area between title and version
-    int areaTop0 = UI_PAD + 16 + UI_PAD;
-    int areaBot0 = displayH - UI_PAD - 16 - UI_PAD;
-    int areaH0 = areaBot0 - areaTop0;
-    // Fixed lines: timer(1+3) + standby(1+2) + fonts_header(1) + unicode(1) + confirm(1) = 10
-    // Fixed seps: 3 (after timer, after standby, after fonts/before unicode)
-    int fixedH = 10 * UI_LINE_H + 3 * UI_PAD;
-    int spaceForFonts = areaH0 - fixedH;
-    int maxFontLines = spaceForFonts / UI_LINE_H;
+    if (fontsInline) {
+        w = uiTextWidth("Fonts:  > Deselect all"); if (w > maxW) maxW = w;
+        if (fontCount <= MAX_FONTS_NO_PAGE) {
+            fontsPerPage = fontCount;
+            totalPages = 1;
+        } else {
+            fontsPerPage = FONTS_PER_PAGE;
+            totalPages = (fontCount + fontsPerPage - 1) / fontsPerPage;
+        }
+        if (totalPages < 1) totalPages = 1;
+        if (fontPage >= totalPages) fontPage = totalPages - 1;
 
-    // Pagination logic: if all fonts fit, show all. Otherwise show (maxFontLines-1) + nav line.
-    int fontsPerPage;
-    int totalPages;
-    if (fontCount <= maxFontLines) {
-        fontsPerPage = fontCount;
-        totalPages = 1;
+        startFont = fontPage * fontsPerPage;
+        endFont = startFont + fontsPerPage;
+        if (endFont > fontCount) endFont = fontCount;
+
+        for (int i = startFont; i < endFont; i++) {
+            snprintf(buf, sizeof(buf), "(*) %s", fontNames[i].c_str());
+            String s = shortenText(String(buf), maxTextW);
+            w = uiTextWidth(s.c_str()); if (w > maxW) maxW = w;
+        }
     } else {
-        fontsPerPage = maxFontLines - 1; // reserve 1 line for nav
-        if (fontsPerPage < 2) fontsPerPage = 2;
-        totalPages = (fontCount + fontsPerPage - 1) / fontsPerPage;
-    }
-    if (totalPages < 1) totalPages = 1;
-    if (fontPage >= totalPages) fontPage = totalPages - 1;
-
-    int startFont = fontPage * fontsPerPage;
-    int endFont = startFont + fontsPerPage;
-    if (endFont > fontCount) endFont = fontCount;
-
-    // Measure font names (shorten if needed to fit screen with margins)
-    int maxTextW = displayW - 2 * UI_LEFT; // max pixel width for any text line
-    for (int i = startFont; i < endFont; i++) {
-        snprintf(buf, sizeof(buf), "(*) %s", fontNames[i].c_str());
-        String s = shortenText(String(buf), maxTextW);
-        w = uiTextWidth(s.c_str()); if (w > maxW) maxW = w;
+        w = uiTextWidth("> Fonts"); if (w > maxW) maxW = w;
     }
 
     // Calculate left X to center the whole block
@@ -1141,23 +1232,60 @@ void renderSetupScreen(int fontPage) {
     if (leftX < UI_LEFT) leftX = UI_LEFT;
 
     // -- Calculate total content height for vertical centering --
-    // Lines: timer label(1) + 3 radios + standby label(1) + 2 checkboxes
-    //        + fonts header(1) + fonts shown + unicode(1) + confirm(1)
-    int contentLines = 4 + 3 + 1 + (endFont - startFont) + 2;
-    int contentSeps = 3; // after timer, after standby, after fonts
-    int navLineH = (totalPages > 1) ? UI_LINE_H : 0;
-    int totalContentH = contentLines * UI_LINE_H + contentSeps * UI_PAD + navLineH;
+    // Count all lines:
+    //   Refresh timer label(1) + 3 radios
+    //   + gap
+    //   + When in standby label(1) + 2 checkboxes
+    //   + gap
+    //   + Fonts header(1) + fonts shown + nav line (if paginated)
+    //   + gap
+    //   + Unicode ranges(1) + Flip interface(1)
+    //   + gap
+    //   + Confirm(1)
+    int fontLines;
+    if (fontsInline) {
+        int fontsShown = endFont - startFont;
+        int navLine = (totalPages > 1) ? 1 : 0;
+        fontLines = 1 + fontsShown + navLine; // fonts header + fonts + nav
+    } else {
+        fontLines = 1; // just "> Fonts" link
+    }
+    int totalLines = 1 + 3          // timer label + 3 radios
+                   + 1 + 2          // standby label + 2 checkboxes
+                   + fontLines      // fonts (inline or link)
+                   + 2              // unicode + flip
+                   + 1;             // confirm
+    int totalGaps = 4; // after timer radios, after standby, after fonts, before confirm
+    int totalContentH = totalLines * UI_LINE_H + totalGaps * UI_PAD;
 
-    // Usable area: between title+pad and version+pad
-    int areaTop = UI_PAD + 16 + UI_PAD;  // after title
-    int areaBot = displayH - UI_PAD - 16 - UI_PAD; // before version
+    // Title at top (fixed), version at bottom (fixed)
+    int titleH = 16;
+    int titleY = UI_PAD;
+    int versionY = displayH - UI_PAD;
+
+    // Usable area between title bottom and version top
+    int areaTop = titleY + titleH;
+    int areaBot = versionY - titleH; // version is bottom-aligned, so its top is ~here
     int areaH = areaBot - areaTop;
 
-    int startY = areaTop + (areaH - totalContentH) / 2;
-    if (startY < areaTop) startY = areaTop;
+    // Center content vertically: equal gap above and below
+    int gap = (areaH - totalContentH) / 2;
+    if (gap < UI_PAD) gap = UI_PAD;
+    int startY = areaTop + gap;
 
     // -- Pass 2: draw everything --
-    uiBeginScreen("PaperSpecimen S3 Setup");
+    uiBeginScreen();
+    // Title fixed at top, version fixed at bottom
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("PaperSpecimen S3", displayW / 2, UI_PAD);
+    M5.Display.setTextDatum(bottom_center);
+    if (debugMode) {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%s - %.0f%%", VERSION, batteryPct);
+        M5.Display.drawString(vbuf, displayW / 2, displayH - UI_PAD);
+    } else {
+        M5.Display.drawString(VERSION, displayW / 2, displayH - UI_PAD);
+    }
     M5.Display.setTextDatum(top_left);
 
     int y = startY;
@@ -1191,41 +1319,50 @@ void renderSetupScreen(int fontPage) {
     addUiItem(y, UI_LINE_H, ID_DIFF_MODE);
     y += UI_LINE_H + UI_PAD;
 
-    // Fonts header (label indented)
-    bool allFonts = true;
-    for (int i = 0; i < fontCount; i++)
-        if (!config.fontEnabled[i]) { allFonts = false; break; }
-    snprintf(buf, sizeof(buf), "Fonts:  > %s all", allFonts ? "Deselect" : "Select");
-    M5.Display.drawString(buf, leftX + indent, y);
-    addUiItem(y, UI_LINE_H, ID_FONT_SELALL);
-    y += UI_LINE_H;
-
-    // Font checkboxes
-    for (int i = startFont; i < endFont; i++) {
-        snprintf(buf, sizeof(buf), "%s %s",
-                 config.fontEnabled[i] ? "(*)" : "( )",
-                 fontNames[i].c_str());
-        String s = shortenText(String(buf), maxTextW);
-        M5.Display.drawString(s.c_str(), leftX, y);
-        addUiItem(y, UI_LINE_H, ID_FONT_BASE + i);
+    if (fontsInline) {
+        // Fonts header (label indented) with inline list
+        bool allFonts = true;
+        for (int i = 0; i < fontCount; i++)
+            if (!config.fontEnabled[i]) { allFonts = false; break; }
+        snprintf(buf, sizeof(buf), "Fonts:  > %s all", allFonts ? "Deselect" : "Select");
+        M5.Display.drawString(buf, leftX + indent, y);
+        addUiItem(y, UI_LINE_H, ID_FONT_SELALL);
         y += UI_LINE_H;
-    }
 
-    // Font page navigation (only if paginated)
-    if (totalPages > 1) {
-        if (fontPage > 0) {
-            M5.Display.drawString("<<<", leftX, y);
+        // Font checkboxes
+        for (int i = startFont; i < endFont; i++) {
+            snprintf(buf, sizeof(buf), "%s %s",
+                     config.fontEnabled[i] ? "(*)" : "( )",
+                     fontNames[i].c_str());
+            String s = shortenText(String(buf), maxTextW);
+            M5.Display.drawString(s.c_str(), leftX, y);
+            addUiItem(y, UI_LINE_H, ID_FONT_BASE + i);
+            y += UI_LINE_H;
         }
-        M5.Display.setTextDatum(top_center);
-        snprintf(buf, sizeof(buf), "Page %d/%d", fontPage + 1, totalPages);
-        M5.Display.drawString(buf, displayW / 2, y);
-        if (fontPage < totalPages - 1) {
-            M5.Display.setTextDatum(top_right);
-            M5.Display.drawString(">>>", displayW - leftX, y);
+
+        // Font page navigation (only if paginated)
+        if (totalPages > 1) {
+            if (fontPage > 0) {
+                M5.Display.drawString("<<<", leftX, y);
+            }
+            M5.Display.setTextDatum(top_center);
+            snprintf(buf, sizeof(buf), "Page %d/%d", fontPage + 1, totalPages);
+            M5.Display.drawString(buf, displayW / 2, y);
+            if (fontPage < totalPages - 1) {
+                M5.Display.setTextDatum(top_right);
+                M5.Display.drawString(">>>", displayW - leftX, y);
+            }
+            addUiItemX(0, y, displayW / 2, UI_LINE_H, ID_FONT_PREV);
+            addUiItemX(displayW / 2, y, displayW / 2, UI_LINE_H, ID_FONT_NEXT);
+            M5.Display.setTextDatum(top_left);
+            y += UI_LINE_H;
         }
-        addUiItem(y, UI_LINE_H, ID_FONT_PREV);
-        addUiItem(y, UI_LINE_H, ID_FONT_NEXT);
-        M5.Display.setTextDatum(top_left);
+    } else {
+        // > Fonts link (opens sub-screen)
+        int arrowW = uiTextWidth("> ");
+        M5.Display.drawString(">", leftX + indent - arrowW, y);
+        M5.Display.drawString("Fonts", leftX + indent, y);
+        addUiItem(y, UI_LINE_H, ID_FONTS_LINK);
         y += UI_LINE_H;
     }
 
@@ -1238,8 +1375,129 @@ void renderSetupScreen(int fontPage) {
     y += UI_LINE_H;
 
     M5.Display.drawString(">", leftX + indent - arrowW, y);
+    M5.Display.drawString("Flip interface", leftX + indent, y);
+    addUiItem(y, UI_LINE_H, ID_FLIP);
+    y += UI_LINE_H;
+
+    y += UI_PAD;  // gap before confirm buttons
+
+    M5.Display.drawString(">", leftX + indent - arrowW, y);
     M5.Display.drawString("Confirm", leftX + indent, y);
     addUiItem(y, UI_LINE_H, ID_CONFIRM);
+
+    uiFlush();
+}
+
+// ---- Setup: Fonts sub-screen (when fontCount > 20) ----
+
+#define ID_FSUB_BACK     600
+#define ID_FSUB_SELALL   601
+#define ID_FSUB_PAGE     602   // left half prev, right half (603) next
+#define ID_FSUB_BASE     700   // 700 + fontIndex
+#define FONTS_SUB_PER_PAGE 14
+
+void renderFontsScreen(int page) {
+    uiItemCount = 0;
+    char buf[80];
+
+    M5.Display.setTextSize(2);
+    M5.Display.setFont(&fonts::Font0);
+
+    int maxW = 0;
+    int w;
+
+    w = uiTextWidth("> Back"); if (w > maxW) maxW = w;
+    w = uiTextWidth("> Deselect all"); if (w > maxW) maxW = w;
+
+    int totalPages = (fontCount + FONTS_SUB_PER_PAGE - 1) / FONTS_SUB_PER_PAGE;
+    if (totalPages < 1) totalPages = 1;
+    if (page >= totalPages) page = totalPages - 1;
+    int startF = page * FONTS_SUB_PER_PAGE;
+    int endF = startF + FONTS_SUB_PER_PAGE;
+    if (endF > fontCount) endF = fontCount;
+
+    int maxTextW = displayW - 2 * UI_LEFT;
+    for (int i = startF; i < endF; i++) {
+        snprintf(buf, sizeof(buf), "(*) %s", fontNames[i].c_str());
+        String s = shortenText(String(buf), maxTextW);
+        w = uiTextWidth(s.c_str()); if (w > maxW) maxW = w;
+    }
+
+    int leftX = uiGroupX(maxW);
+    if (leftX < UI_LEFT) leftX = UI_LEFT;
+
+    int fontsOnPage = endF - startF;
+    int navLineH = (totalPages > 1) ? (UI_LINE_H + UI_PAD) : 0;
+    int backLineH = UI_PAD + UI_LINE_H;
+    int totalContentH = navLineH + fontsOnPage * UI_LINE_H + backLineH;
+
+    int titleH = 16;
+    int titleY = UI_PAD;
+    int versionY = displayH - UI_PAD;
+    int areaTop = titleY + titleH;
+    int areaBot = versionY - titleH;
+    int areaH = areaBot - areaTop;
+    int gap = (areaH - totalContentH) / 2;
+    if (gap < UI_PAD) gap = UI_PAD;
+    int startY = areaTop + gap;
+
+    uiBeginScreen();
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("Fonts", displayW / 2, UI_PAD);
+    M5.Display.setTextDatum(bottom_center);
+    if (debugMode) {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%s - %.0f%%", VERSION, batteryPct);
+        M5.Display.drawString(vbuf, displayW / 2, displayH - UI_PAD);
+    } else {
+        M5.Display.drawString(VERSION, displayW / 2, displayH - UI_PAD);
+    }
+    M5.Display.setTextDatum(top_left);
+
+    int y = startY;
+
+    // Page navigation (<<< Page N/M >>>) — split left/right for multi-page
+    if (totalPages > 1) {
+        if (page > 0) {
+            M5.Display.drawString("<<<", leftX, y);
+        }
+        M5.Display.setTextDatum(top_center);
+        snprintf(buf, sizeof(buf), "Page %d/%d", page + 1, totalPages);
+        M5.Display.drawString(buf, displayW / 2, y);
+        if (page < totalPages - 1) {
+            M5.Display.setTextDatum(top_right);
+            M5.Display.drawString(">>>", displayW - leftX, y);
+        }
+        addUiItemX(0, y, displayW / 2, UI_LINE_H, ID_FSUB_PAGE);       // left half = prev
+        addUiItemX(displayW / 2, y, displayW / 2, UI_LINE_H, ID_FSUB_PAGE + 1); // right half = next
+        M5.Display.setTextDatum(top_left);
+        y += UI_LINE_H + UI_PAD;
+    }
+
+    // Font checkboxes
+    for (int i = startF; i < endF; i++) {
+        snprintf(buf, sizeof(buf), "%s %s",
+                 config.fontEnabled[i] ? "(*)" : "( )",
+                 fontNames[i].c_str());
+        String s = shortenText(String(buf), maxTextW);
+        M5.Display.drawString(s.c_str(), leftX, y);
+        addUiItem(y, UI_LINE_H, ID_FSUB_BASE + i);
+        y += UI_LINE_H;
+    }
+
+    // Back (left) + Select/Deselect (right)
+    y += UI_PAD;
+    M5.Display.drawString("> Back", leftX, y);
+    addUiItemX(0, y, displayW / 2, UI_LINE_H, ID_FSUB_BACK);
+
+    bool allFonts = true;
+    for (int i = 0; i < fontCount; i++)
+        if (!config.fontEnabled[i]) { allFonts = false; break; }
+    snprintf(buf, sizeof(buf), "> %s all", allFonts ? "Deselect" : "Select");
+    M5.Display.setTextDatum(top_right);
+    M5.Display.drawString(buf, displayW - leftX, y);
+    addUiItemX(displayW / 2, y, displayW / 2, UI_LINE_H, ID_FSUB_SELALL);
+    M5.Display.setTextDatum(top_left);
 
     uiFlush();
 }
@@ -1282,38 +1540,47 @@ void renderRangesScreen(int rangePage) {
     if (leftX < UI_LEFT) leftX = UI_LEFT;
 
     // -- Calculate total content height for vertical centering --
+    // Order: [page nav] + ranges + [back/select]
     int rangesOnPage = endR - startR;
-    int contentLines = 1 + rangesOnPage; // back/select line + range checkboxes
-    int contentSeps = 1; // after back/select line
-    int navLineH = (totalPages > 1) ? (UI_PAD + UI_LINE_H) : 0; // gap + nav line
-    int totalContentH = contentLines * UI_LINE_H + contentSeps * UI_PAD + navLineH;
+    int navLineH = (totalPages > 1) ? (UI_LINE_H + UI_PAD) : 0; // nav line + gap after
+    int backLineH = UI_PAD + UI_LINE_H; // gap before + back/select line
+    int totalContentH = navLineH + rangesOnPage * UI_LINE_H + backLineH;
 
-    int areaTop = UI_PAD + 16 + UI_PAD;
-    int areaBot = displayH - UI_PAD - 16 - UI_PAD;
+    int titleH = 16;
+    int titleY = UI_PAD;
+    int versionY = displayH - UI_PAD;
+    int areaTop = titleY + titleH;
+    int areaBot = versionY - titleH;
     int areaH = areaBot - areaTop;
-
-    int startY = areaTop + (areaH - totalContentH) / 2;
-    if (startY < areaTop) startY = areaTop;
+    int gap = (areaH - totalContentH) / 2;
+    if (gap < UI_PAD) gap = UI_PAD;
+    int startY = areaTop + gap;
 
     // -- Pass 2: draw --
-    uiBeginScreen("Unicode Ranges");
+    uiBeginScreen();
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("Unicode Ranges", displayW / 2, UI_PAD);
+    M5.Display.setTextDatum(bottom_center);
+    if (debugMode) {
+        char vbuf[32];
+        snprintf(vbuf, sizeof(vbuf), "%s - %.0f%%", VERSION, batteryPct);
+        M5.Display.drawString(vbuf, displayW / 2, displayH - UI_PAD);
+    } else {
+        M5.Display.drawString(VERSION, displayW / 2, displayH - UI_PAD);
+    }
     M5.Display.setTextDatum(top_left);
 
     int y = startY;
 
-    // Back (left-aligned) + Select/Deselect (right-aligned on same line)
-    M5.Display.drawString("> Back", leftX, y);
-    addUiItem(y, UI_LINE_H, ID_RANGE_BACK);
-
-    bool allRanges = true;
-    for (int i = 0; i < NUM_GLYPH_RANGES; i++)
-        if (!config.rangeEnabled[i]) { allRanges = false; break; }
-    snprintf(buf, sizeof(buf), "> %s all", allRanges ? "Deselect" : "Select");
-    M5.Display.setTextDatum(top_right);
-    M5.Display.drawString(buf, displayW - leftX, y);
-    addUiItem(y, UI_LINE_H, ID_RANGE_SELALL);
-    M5.Display.setTextDatum(top_left);
-    y += UI_LINE_H + UI_PAD;
+    // Page indicator (top, if multiple pages) — tap anywhere to toggle page
+    if (totalPages > 1) {
+        M5.Display.setTextDatum(top_center);
+        snprintf(buf, sizeof(buf), "Page %d/%d", rangePage + 1, totalPages);
+        M5.Display.drawString(buf, displayW / 2, y);
+        M5.Display.setTextDatum(top_left);
+        addUiItem(y, UI_LINE_H, ID_RANGE_NEXT);
+        y += UI_LINE_H + UI_PAD;
+    }
 
     // Range checkboxes
     for (int ri = startR; ri < endR; ri++) {
@@ -1325,23 +1592,19 @@ void renderRangesScreen(int rangePage) {
         y += UI_LINE_H;
     }
 
-    // Page nav
-    if (totalPages > 1) {
-        y += UI_PAD;
-        if (rangePage > 0) {
-            M5.Display.drawString("<<<", leftX, y);
-        }
-        M5.Display.setTextDatum(top_center);
-        snprintf(buf, sizeof(buf), "Page %d/%d", rangePage + 1, totalPages);
-        M5.Display.drawString(buf, displayW / 2, y);
-        if (rangePage < totalPages - 1) {
-            M5.Display.setTextDatum(top_right);
-            M5.Display.drawString(">>>", displayW - leftX, y);
-        }
-        addUiItem(y, UI_LINE_H, ID_RANGE_PREV);
-        addUiItem(y, UI_LINE_H, ID_RANGE_NEXT);
-        M5.Display.setTextDatum(top_left);
-    }
+    // Back (left half) + Select/Deselect (right half) at bottom
+    y += UI_PAD;
+    M5.Display.drawString("> Back", leftX, y);
+    addUiItemX(0, y, displayW / 2, UI_LINE_H, ID_RANGE_BACK);
+
+    bool allRanges = true;
+    for (int i = 0; i < NUM_GLYPH_RANGES; i++)
+        if (!config.rangeEnabled[i]) { allRanges = false; break; }
+    snprintf(buf, sizeof(buf), "> %s all", allRanges ? "Deselect" : "Select");
+    M5.Display.setTextDatum(top_right);
+    M5.Display.drawString(buf, displayW - leftX, y);
+    addUiItemX(displayW / 2, y, displayW / 2, UI_LINE_H, ID_RANGE_SELALL);
+    M5.Display.setTextDatum(top_left);
 
     uiFlush();
 }
@@ -1375,7 +1638,8 @@ void runSetupScreen() {
 
         lastActivity = millis();
         int tx = touch.x, ty = touch.y;
-        int id = hitTestUi(ty);
+
+        int id = hitTestUi(tx, ty);
         bool redraw = true;
 
         if (id == ID_CONFIRM) {
@@ -1410,6 +1674,67 @@ void runSetupScreen() {
             if (tx < displayW / 3 && fontPage > 0) fontPage--;
             else if (tx > displayW * 2 / 3) fontPage++; // renderSetupScreen clamps
         }
+        else if (id == ID_FLIP) {
+            config.flipInterface = !config.flipInterface;
+            applyRotation();
+        }
+        else if (id == ID_FONTS_LINK) {
+            // Enter fonts sub-screen (>20 fonts)
+            int fSubPage = 0;
+            renderFontsScreen(fSubPage);
+            bool inFonts = true;
+            while (inFonts) {
+                M5.update();
+                if (millis() - lastActivity >= AUTO_CONFIRM_MS) { inFonts = false; break; }
+                if (M5.BtnA.wasPressed()) { inFonts = false; break; }
+
+                auto ft = M5.Touch.getDetail();
+                if (!ft.wasPressed()) { delay(20); continue; }
+
+                lastActivity = millis();
+                int ftx = ft.x, fty = ft.y;
+                int fid = hitTestUi(ftx, fty);
+                bool fRedraw = true;
+
+                if (fid == ID_FSUB_BACK) {
+                    inFonts = false;
+                }
+                else if (fid == ID_FSUB_SELALL) {
+                    bool all = true;
+                    for (int i = 0; i < fontCount; i++)
+                        if (!config.fontEnabled[i]) { all = false; break; }
+                    for (int i = 0; i < fontCount; i++) config.fontEnabled[i] = !all;
+                }
+                else if (fid == ID_FSUB_PAGE) {
+                    // Left half = prev page
+                    if (fSubPage > 0) fSubPage--;
+                    else fRedraw = false;
+                }
+                else if (fid == ID_FSUB_PAGE + 1) {
+                    // Right half = next page
+                    int tp = (fontCount + FONTS_SUB_PER_PAGE - 1) / FONTS_SUB_PER_PAGE;
+                    if (fSubPage < tp - 1) fSubPage++;
+                    else fRedraw = false;
+                }
+                else if (fid >= ID_FSUB_BASE && fid < ID_FSUB_BASE + fontCount) {
+                    int fi = fid - ID_FSUB_BASE;
+                    config.fontEnabled[fi] = !config.fontEnabled[fi];
+                    // Ensure at least one font enabled
+                    bool any = false;
+                    for (int i = 0; i < fontCount; i++)
+                        if (config.fontEnabled[i]) { any = true; break; }
+                    if (!any) config.fontEnabled[fi] = true;
+                }
+                else fRedraw = false;
+
+                if (fRedraw) {
+                    M5.Display.waitDisplay();
+                    renderFontsScreen(fSubPage);
+                }
+            }
+            // Back to main setup screen
+            M5.Display.waitDisplay();
+        }
         else if (id == ID_UNICODE_LINK) {
             // Enter ranges sub-screen
             int rangePage = 0;
@@ -1424,31 +1749,19 @@ void runSetupScreen() {
                 if (!rt.wasPressed()) { delay(20); continue; }
                 lastActivity = millis();
 
-                int rid = hitTestUi(rt.y);
-                int rtx = rt.x;
+                int rtx = rt.x, rty = rt.y;
+                int rid = hitTestUi(rtx, rty);
                 bool rRedraw = true;
 
                 if (rid == ID_RANGE_BACK) {
-                    if (rtx < displayW / 2) { inRanges = false; rRedraw = false; }
-                    else {
-                        // Select/Deselect all (right half of that line)
-                        bool all = true;
-                        for (int i = 0; i < NUM_GLYPH_RANGES; i++)
-                            if (!config.rangeEnabled[i]) { all = false; break; }
-                        for (int i = 0; i < NUM_GLYPH_RANGES; i++)
-                            config.rangeEnabled[i] = !all;
-                    }
+                    inRanges = false; rRedraw = false;
                 }
                 else if (rid == ID_RANGE_SELALL) {
-                    if (rtx >= displayW / 2) {
-                        bool all = true;
-                        for (int i = 0; i < NUM_GLYPH_RANGES; i++)
-                            if (!config.rangeEnabled[i]) { all = false; break; }
-                        for (int i = 0; i < NUM_GLYPH_RANGES; i++)
-                            config.rangeEnabled[i] = !all;
-                    } else {
-                        inRanges = false; rRedraw = false; // Back
-                    }
+                    bool all = true;
+                    for (int i = 0; i < NUM_GLYPH_RANGES; i++)
+                        if (!config.rangeEnabled[i]) { all = false; break; }
+                    for (int i = 0; i < NUM_GLYPH_RANGES; i++)
+                        config.rangeEnabled[i] = !all;
                 }
                 else if (rid >= ID_RANGE_BASE && rid < ID_RANGE_PREV) {
                     int ri = rid - ID_RANGE_BASE;
@@ -1458,11 +1771,9 @@ void runSetupScreen() {
                         if (config.rangeEnabled[i]) { any = true; break; }
                     if (!any) config.rangeEnabled[ri] = true;
                 }
-                else if (rid == ID_RANGE_PREV || rid == ID_RANGE_NEXT) {
-                    int totalPages = (NUM_GLYPH_RANGES + RANGES_PER_PAGE - 1) / RANGES_PER_PAGE;
-                    if (rtx < displayW / 3 && rangePage > 0) rangePage--;
-                    else if (rtx > displayW * 2 / 3 && rangePage < totalPages - 1) rangePage++;
-                    else rRedraw = false;
+                else if (rid == ID_RANGE_NEXT) {
+                    // Toggle between page 0 and page 1
+                    rangePage = (rangePage == 0) ? 1 : 0;
                 }
                 else rRedraw = false;
 
@@ -1495,11 +1806,6 @@ void runSetupScreen() {
 
 // Convert RTC date+time to a flat minute count for easy comparison
 // (only needs to be consistent within a day, not absolute)
-uint32_t rtcToMinutes() {
-    auto dt = M5.Rtc.getDateTime();
-    return (uint32_t)dt.time.hours * 60 + dt.time.minutes;
-}
-
 uint32_t rtcToSeconds() {
     auto dt = M5.Rtc.getDateTime();
     return (uint32_t)dt.time.hours * 3600 + dt.time.minutes * 60 + dt.time.seconds;
@@ -1509,7 +1815,10 @@ uint32_t rtcToSeconds() {
 
 // Returns: 0 = not sleeping (cold boot), 1 = timer wake, 2 = manual wake (button)
 // Also stores the expected wake time in lastExpectedWakeSec for anchored sleep calc
+// Reads last_font and last_mode in the same NVS open to avoid reopening later
 static uint32_t lastExpectedWakeSec = 0;
+static int nvsLastFont = 0;
+static int nvsLastMode = VIEW_BITMAP;
 
 int checkWakeReason() {
     Preferences prefs;
@@ -1521,6 +1830,8 @@ int checkWakeReason() {
     }
 
     lastExpectedWakeSec = prefs.getUInt("wake_sec", 0);
+    nvsLastFont = prefs.getInt("last_font", 0);
+    nvsLastMode = prefs.getInt("last_mode", VIEW_BITMAP);
     // Clear flag
     prefs.putBool("sleeping", false);
     prefs.end();
@@ -1619,7 +1930,7 @@ void doSleepAt(uint32_t wakeTargetSec) {
         prefs.putBool("sleeping", true);
         prefs.putUInt("wake_sec", wakeExact);
         prefs.putUInt("wake_int", config.wakeIntervalMinutes);
-        // Save current font/mode so timer wake can preserve them if allow* is off
+        // Save current font/mode/appMode so timer wake can preserve them if allow* is off
         prefs.putInt("last_font", currentFontIndex);
         prefs.putInt("last_mode", (int)currentViewMode);
         prefs.end();
@@ -1681,54 +1992,62 @@ void goToSleepAnchored() {
     doSleepAt(nextWakeSec);
 }
 
+// Ensure at least one font is enabled; if none, enable all
+void ensureFontsEnabled() {
+    for (int i = 0; i < fontCount; i++) {
+        if (config.fontEnabled[i]) return; // at least one is enabled
+    }
+    // None enabled — enable all
+    for (int i = 0; i < fontCount; i++) config.fontEnabled[i] = true;
+}
+
 // Pick a random enabled font index
 int pickRandomEnabledFont() {
-    // Count enabled fonts
+    ensureFontsEnabled();
     int enabled[MAX_FONTS];
     int count = 0;
     for (int i = 0; i < fontCount; i++) {
         if (config.fontEnabled[i]) enabled[count++] = i;
     }
-    if (count == 0) return 0;
     return enabled[random(count)];
 }
 
 // ---- Splash + Setup sequence (used at first boot and on long hold) ----
 
 // QR Code bitmap for GitHub repository
-// URL: https://github.com/marcelloemme/PaperSpecimen
+// URL: https://github.com/marcelloemme/PaperSpecimenS3
 // Size: 29x29 modules (Version 3 QR Code)
 const uint8_t QR_SIZE = 29;
 const uint8_t qrcode_data[] PROGMEM = {
-    0b11111110, 0b01000010, 0b10111011, 0b11111000,  // Row 0
-    0b10000010, 0b11011101, 0b11100010, 0b00001000,  // Row 1
-    0b10111010, 0b01110001, 0b10010010, 0b11101000,  // Row 2
-    0b10111010, 0b11010011, 0b01001010, 0b11101000,  // Row 3
-    0b10111010, 0b00101010, 0b10111010, 0b11101000,  // Row 4
-    0b10000010, 0b10100101, 0b00001010, 0b00001000,  // Row 5
+    0b11111110, 0b11110100, 0b01100011, 0b11111000,  // Row 0
+    0b10000010, 0b00011010, 0b11111010, 0b00001000,  // Row 1
+    0b10111010, 0b01010101, 0b00000010, 0b11101000,  // Row 2
+    0b10111010, 0b00110000, 0b11000010, 0b11101000,  // Row 3
+    0b10111010, 0b00111000, 0b11110010, 0b11101000,  // Row 4
+    0b10000010, 0b01010100, 0b11001010, 0b00001000,  // Row 5
     0b11111110, 0b10101010, 0b10101011, 0b11111000,  // Row 6
-    0b00000000, 0b00001011, 0b00000000, 0b00000000,  // Row 7
-    0b11111011, 0b11101111, 0b11000101, 0b01010000,  // Row 8
-    0b11100001, 0b11000010, 0b11111011, 0b10001000,  // Row 9
-    0b11110110, 0b11011001, 0b10001000, 0b10000000,  // Row 10
-    0b10011100, 0b11110001, 0b00101000, 0b01010000,  // Row 11
-    0b10110110, 0b11010111, 0b01010000, 0b01100000,  // Row 12
-    0b00110100, 0b00101000, 0b11111111, 0b10001000,  // Row 13
-    0b10100011, 0b11100011, 0b00001100, 0b11100000,  // Row 14
-    0b00111001, 0b10001011, 0b00111111, 0b10010000,  // Row 15
-    0b01000111, 0b00101111, 0b11010101, 0b01100000,  // Row 16
-    0b11010101, 0b11100001, 0b11110111, 0b10101000,  // Row 17
-    0b10100110, 0b11111101, 0b11001011, 0b10100000,  // Row 18
-    0b10110101, 0b00010010, 0b10001110, 0b00010000,  // Row 19
-    0b10001110, 0b01111110, 0b01011111, 0b10111000,  // Row 20
-    0b00000000, 0b10101100, 0b00101000, 0b11111000,  // Row 21
-    0b11111110, 0b11001001, 0b10011010, 0b11100000,  // Row 22
-    0b10000010, 0b00010011, 0b10011000, 0b10000000,  // Row 23
-    0b10111010, 0b10111111, 0b01001111, 0b10101000,  // Row 24
-    0b10111010, 0b11010100, 0b11111000, 0b01111000,  // Row 25
-    0b10111010, 0b11100011, 0b10011111, 0b11110000,  // Row 26
-    0b10000010, 0b11000011, 0b10001101, 0b01010000,  // Row 27
-    0b11111110, 0b11101110, 0b01010011, 0b10100000   // Row 28
+    0b00000000, 0b11001100, 0b00011000, 0b00000000,  // Row 7
+    0b11011010, 0b01001011, 0b01010010, 0b00001000,  // Row 8
+    0b10000001, 0b10100001, 0b01110101, 0b10110000,  // Row 9
+    0b01100011, 0b01001011, 0b11000001, 0b10100000,  // Row 10
+    0b11111000, 0b00000000, 0b11101111, 0b01001000,  // Row 11
+    0b10101011, 0b11101001, 0b10001011, 0b00001000,  // Row 12
+    0b11101001, 0b00101111, 0b11100011, 0b11111000,  // Row 13
+    0b10010011, 0b01100111, 0b10011110, 0b10101000,  // Row 14
+    0b00101001, 0b00011000, 0b10110001, 0b10101000,  // Row 15
+    0b10111010, 0b11010101, 0b10011100, 0b01000000,  // Row 16
+    0b11001101, 0b01101000, 0b00110000, 0b10110000,  // Row 17
+    0b11010011, 0b00110011, 0b00010000, 0b11001000,  // Row 18
+    0b11101000, 0b00111101, 0b10010010, 0b01100000,  // Row 19
+    0b11110010, 0b01100010, 0b11001111, 0b11110000,  // Row 20
+    0b00000000, 0b11100111, 0b10101000, 0b11000000,  // Row 21
+    0b11111110, 0b00011011, 0b11011010, 0b11000000,  // Row 22
+    0b10000010, 0b00000010, 0b01011000, 0b10010000,  // Row 23
+    0b10111010, 0b11101001, 0b10011111, 0b11000000,  // Row 24
+    0b10111010, 0b10010011, 0b11100100, 0b00001000,  // Row 25
+    0b10111010, 0b01100111, 0b00001101, 0b10111000,  // Row 26
+    0b10000010, 0b11100000, 0b00000011, 0b01101000,  // Row 27
+    0b11111110, 0b11111100, 0b00011010, 0b10000000   // Row 28
 };
 
 // Draw QR code centered at (centerX, centerY) with given pixel size per module
@@ -1785,7 +2104,7 @@ void runSplashAndSetup() {
         }
         delay(20);
     }
-    if (tapCount >= 2) {
+    if (tapCount >= 4) {
         config.isDebugMode = true;
         debugMode = true;
         Serial.println("*** DEBUG MODE ACTIVATED ***");
@@ -1803,7 +2122,7 @@ void runSplashAndSetup() {
     setupFirstRender = true;
     runSetupScreen();
 
-    // After setup, render first glyph
+    // After setup, render first content
     currentFontIndex = 0;
     for (int i = 0; i < fontCount; i++) {
         if (config.fontEnabled[i]) { currentFontIndex = i; break; }
@@ -1815,6 +2134,10 @@ void runSplashAndSetup() {
         drawGlyph(cp);
         M5.Display.waitDisplay();
     }
+
+    // Flush any queued touch events (e.g. double-tap on Confirm)
+    // so they don't trigger unintended actions in loop()
+    for (int i = 0; i < 10; i++) { M5.update(); delay(10); }
 }
 
 // ---- Setup & Loop ----
@@ -1871,7 +2194,7 @@ void setup() {
         Serial.println("*** PaperSpecimen S3 BOOT ***");
         Serial.printf("Version: %s\n", VERSION);
     }
-    Serial.printf("Board: %d\n", M5.getBoard());
+    if (earlyDebug) Serial.printf("Board: %d\n", M5.getBoard());
 
     // Log RTC time immediately after M5.begin for wake debug
     {
@@ -1978,6 +2301,7 @@ void setup() {
     }
     Serial.printf("Found %d fonts\n", count);
 
+
     FT_Error err = FT_Init_FreeType(&ftLibrary);
     if (err) {
         Serial.printf("FT_Init_FreeType failed: 0x%02X\n", err);
@@ -1993,6 +2317,7 @@ void setup() {
     initDefaultConfig();
     loadConfig(); // load if exists, otherwise defaults stay
     debugMode = config.isDebugMode; // restore debug mode from persisted config
+    applyRotation(); // apply flip if configured
 
     // Detect wakeup cause:
     // 0 = first boot / NVS clean (never slept)
@@ -2007,23 +2332,16 @@ void setup() {
         // ---- TIMER WAKE: new glyph, then back to sleep ----
         // Disable touch — not needed, saves power, prevents accidental input
         M5.Touch.end();
-        Serial.println("Timer wake — touch disabled, rendering new glyph");
+        Serial.println("Timer wake — touch disabled, rendering new content");
 
-        // Restore last font/mode from NVS, then randomize only if allowed
+        // Restore last state (already read from NVS in checkWakeReason), then randomize if allowed
         {
-            Preferences prefs;
-            prefs.begin("ps3", true);
-            int lastFont = prefs.getInt("last_font", 0);
-            int lastMode = prefs.getInt("last_mode", VIEW_BITMAP);
-            prefs.end();
-
             if (config.allowDifferentFont) {
                 currentFontIndex = pickRandomEnabledFont();
             } else {
-                // Keep the same font that was showing when device went to sleep
-                currentFontIndex = lastFont;
+                currentFontIndex = nvsLastFont;
+                ensureFontsEnabled();
                 if (currentFontIndex >= fontCount || !config.fontEnabled[currentFontIndex]) {
-                    // Fallback: pick first enabled font
                     for (int i = 0; i < fontCount; i++) {
                         if (config.fontEnabled[i]) { currentFontIndex = i; break; }
                     }
@@ -2032,7 +2350,7 @@ void setup() {
             if (config.allowDifferentMode) {
                 currentViewMode = random(2) == 0 ? VIEW_BITMAP : VIEW_OUTLINE;
             } else {
-                currentViewMode = (ViewMode)lastMode;
+                currentViewMode = (ViewMode)nvsLastMode;
             }
         }
 
@@ -2041,20 +2359,33 @@ void setup() {
                       currentViewMode == VIEW_BITMAP ? "BITMAP" : "OUTLINE");
 
         if (loadFontToMemory(currentFontIndex)) {
+            // In normal mode, close SD immediately after font is in PSRAM
+            // saves SPI bus power during rendering and sleep
+            if (!debugMode) {
+                SD.end();
+                Serial.println("SD closed early (normal mode)");
+            }
+
             isFirstRender = true;
+
+            // Find a non-blank glyph (trial fonts may have empty glyphs)
             uint32_t cp = findRandomGlyph();
+            for (int attempt = 0; attempt < 5 && !isGlyphVisible(cp); attempt++) {
+                Serial.printf("Timer wake: U+%04X is blank, retrying\n", cp);
+                cp = findRandomGlyph();
+            }
             Serial.printf("Timer wake glyph: U+%04X\n", cp);
             if (currentViewMode == VIEW_OUTLINE)
                 drawGlyphOutline(cp);
             else
                 drawGlyph(cp);
+            logBatteryDebug(cp, "timer");
             M5.Display.waitDisplay();
             Serial.println("Timer wake: display done");
-            logBatteryDebug(cp, "timer");
         } else {
             Serial.println("ERROR: loadFontToMemory FAILED on timer wake!");
         }
-        goToSleepAnchored(); // stay on schedule, no drift
+        goToSleepAnchored();
 
     } else if (wakeReason == 2) {
         // ---- MANUAL WAKE (button): restore state + interactive mode ----
@@ -2065,13 +2396,10 @@ void setup() {
         // Sanitize debug timer values
         if (config.wakeIntervalMinutes < 5) config.wakeIntervalMinutes = 15;
 
-        // Restore last font/mode from NVS so interactive mode continues from where we were
+        // Restore last font/mode (already read from NVS in checkWakeReason)
         {
-            Preferences prefs;
-            prefs.begin("ps3", true);
-            currentFontIndex = prefs.getInt("last_font", 0);
-            currentViewMode = (ViewMode)prefs.getInt("last_mode", VIEW_BITMAP);
-            prefs.end();
+            currentFontIndex = nvsLastFont;
+            currentViewMode = (ViewMode)nvsLastMode;
 
             if (currentFontIndex >= fontCount || !config.fontEnabled[currentFontIndex]) {
                 for (int i = 0; i < fontCount; i++) {
@@ -2101,7 +2429,7 @@ void setup() {
 
 // Inactivity timer for sleep
 static unsigned long lastInteraction = 0;
-#define INACTIVITY_TIMEOUT_MS 60000
+#define INACTIVITY_TIMEOUT_MS 40000
 // Hold detection for setup
 #define HOLD_FOR_SETUP_MS 5000
 
@@ -2119,20 +2447,66 @@ void loop() {
 
     auto touch = M5.Touch.getDetail();
 
-    // Hold detection: center zone (180-360, 90-870) held 5s+ then released → full restart
+    // Hold detection: center zone (180-360, 90-870)
+    // 1s+: show filling circle feedback, 5s+: enter setup
+    #define HOLD_FEEDBACK_START_MS 1000
+    #define HOLD_CIRCLE_MAX_R 100
+    static int lastCircleR = 0;
+
     uint32_t holdDuration = millis() - touch.base_msec;
-    if (touch.wasReleased() && holdDuration >= HOLD_FOR_SETUP_MS) {
+    if (touch.isPressed()) {
         int x = touch.x;
         int y = touch.y;
-        if (x >= 180 && x < 360 && y >= 90 && y < displayH - 90) {
+        bool inCenterZone = (x >= 180 && x < 360 && y >= 90 && y < displayH - 90);
+
+        if (inCenterZone && holdDuration >= HOLD_FEEDBACK_START_MS) {
+            // Calculate circle progress: 0 at 1s, full at 5s
+            float progress = (float)(holdDuration - HOLD_FEEDBACK_START_MS) /
+                            (float)(HOLD_FOR_SETUP_MS - HOLD_FEEDBACK_START_MS);
+            if (progress > 1.0f) progress = 1.0f;
+            int circleR = (int)(progress * HOLD_CIRCLE_MAX_R);
+
+            // Only redraw if radius changed (avoid excessive redraws)
+            if (circleR != lastCircleR) {
+                wakeDisplay(); // wake display for circle feedback
+                int cx = displayW / 2;
+                int cy = displayH / 2;
+                // Erase previous circle area
+                M5.Display.fillCircle(cx, cy, HOLD_CIRCLE_MAX_R + 2, TFT_WHITE);
+                // Draw outline ring
+                M5.Display.fillSmoothCircle(cx, cy, HOLD_CIRCLE_MAX_R, colorOutline);
+                M5.Display.fillSmoothCircle(cx, cy, HOLD_CIRCLE_MAX_R - 2, TFT_WHITE);
+                // Draw filled portion
+                if (circleR > 0) {
+                    M5.Display.fillSmoothCircle(cx, cy, circleR, colorOutline);
+                }
+                M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+                M5.Display.display();
+                lastCircleR = circleR;
+            }
+        }
+
+        if (inCenterZone && holdDuration >= HOLD_FOR_SETUP_MS) {
+            lastCircleR = 0;
             // Re-enable serial for setup (may have been disabled in normal mode)
             Serial.begin(115200);
             delay(500);
-            Serial.printf("Long hold released (%dms) — full restart\n", holdDuration);
+            Serial.printf("Long hold (%dms) — full restart\n", holdDuration);
             M5.Display.waitDisplay();
             runSplashAndSetup();
             lastInteraction = millis();
             return;
+        }
+    } else {
+        // Touch released — redraw glyph if circle was showing
+        if (lastCircleR > 0) {
+            lastCircleR = 0;
+            M5.Display.waitDisplay();
+            // Redraw current glyph to restore the area under the circle
+            if (currentViewMode == VIEW_OUTLINE)
+                drawGlyphOutline(currentCodepoint);
+            else
+                drawGlyph(currentCodepoint);
         }
     }
 
@@ -2156,10 +2530,10 @@ void loop() {
 
         int x = touch.x;
         int y = touch.y;
+
         Serial.printf("Tap at (%d, %d) held=%dms\n", x, y, holdDuration);
 
         if (y < TOUCH_STRIP_H || y >= displayH - TOUCH_STRIP_H) {
-            // Top or bottom strip: toggle view mode, keep same glyph and font
             currentViewMode = (currentViewMode == VIEW_BITMAP) ? VIEW_OUTLINE : VIEW_BITMAP;
             Serial.printf("Toggle mode: %s\n", currentViewMode == VIEW_BITMAP ? "BITMAP" : "OUTLINE");
             if (currentViewMode == VIEW_OUTLINE)
@@ -2168,7 +2542,6 @@ void loop() {
                 drawGlyph(currentCodepoint);
         }
         else if (x < TOUCH_COL_W) {
-            // Left (x < 180): previous enabled font, keep same glyph and mode
             int start = currentFontIndex;
             do {
                 currentFontIndex--;
@@ -2182,7 +2555,6 @@ void loop() {
                     drawGlyph(currentCodepoint);
             }
         } else if (x >= TOUCH_COL_W * 2) {
-            // Right (x >= 360): next enabled font, keep same glyph and mode
             int start = currentFontIndex;
             do {
                 currentFontIndex++;
@@ -2196,7 +2568,6 @@ void loop() {
                     drawGlyph(currentCodepoint);
             }
         } else {
-            // Center: random glyph, keep same font and mode
             uint32_t cp = findRandomGlyph();
             Serial.printf("Random glyph: U+%04X\n", cp);
             if (currentViewMode == VIEW_OUTLINE)
@@ -2213,13 +2584,23 @@ void loop() {
 
         if (timeSinceFirstPartial >= FULL_REFRESH_TIMEOUT_MS &&
             timeSinceLastFull >= FULL_REFRESH_TIMEOUT_MS) {
+            // Wait for any pending refresh to complete before redrawing
+            M5.Display.waitDisplay();
             Serial.println("Timed full refresh");
             partialRefreshCount = MAX_PARTIAL_BEFORE_FULL;
-            if (currentViewMode == VIEW_OUTLINE)
+            if (currentViewMode == VIEW_OUTLINE) {
                 drawGlyphOutline(currentCodepoint);
-            else
+            } else {
                 drawGlyph(currentCodepoint);
+            }
         }
+    }
+
+    // Delayed display sleep: 3s after last FULL refresh with no input, sleep the controller
+    // Partial refreshes don't reset the timer — display stays awake for the timed full refresh
+    if (!displaySleeping && lastFullRefreshDone > 0 &&
+        millis() - lastFullRefreshDone >= DISPLAY_SLEEP_DELAY_MS) {
+        sleepDisplay();
     }
 
     delay(20); // ~50Hz touch polling — saves CPU cycles vs 100Hz, still responsive

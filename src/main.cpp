@@ -5,6 +5,10 @@
 #include <Preferences.h>
 #include <esp_wifi.h>
 #include <esp_bt.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include "web_content.h"
 
 // FreeType headers (provided by OpenFontRender)
 #include "ft2build.h"
@@ -13,8 +17,11 @@
 #include FT_OUTLINE_H
 #include FT_BBOX_H
 
-// PaperSpecimen S3 - v3.4.2
-static const char* VERSION = "v3.4.2";
+// PaperSpecimen S3 - v4.0.0
+static const char* VERSION = "v4.0.0";
+
+// Forward declarations
+void runWiFiFontManager();
 
 // M5PaperS3 SD Card SPI pins
 #define SD_SPI_CS_PIN   47
@@ -1135,6 +1142,7 @@ static int uiItemCount = 0;
 #define ID_DIFF_MODE     21
 #define ID_UNICODE_LINK  30
 #define ID_FLIP          31
+#define ID_WIFI_MANAGER  32
 #define ID_FONT_SELALL   40
 #define ID_FONT_BASE     100   // 100 + fontIndex
 #define ID_FONT_PREV     200
@@ -1239,7 +1247,7 @@ void renderSetupScreen(int fontPage) {
     //   + gap
     //   + Fonts header(1) + fonts shown + nav line (if paginated)
     //   + gap
-    //   + Unicode ranges(1) + Flip interface(1)
+    //   + Unicode ranges(1) + Flip interface(1) + Manage fonts WiFi(1)
     //   + gap
     //   + Confirm(1)
     int fontLines;
@@ -1253,7 +1261,7 @@ void renderSetupScreen(int fontPage) {
     int totalLines = 1 + 3          // timer label + 3 radios
                    + 1 + 2          // standby label + 2 checkboxes
                    + fontLines      // fonts (inline or link)
-                   + 2              // unicode + flip
+                   + 3              // unicode + flip + wifi manager
                    + 1;             // confirm
     int totalGaps = 4; // after timer radios, after standby, after fonts, before confirm
     int totalContentH = totalLines * UI_LINE_H + totalGaps * UI_PAD;
@@ -1379,7 +1387,12 @@ void renderSetupScreen(int fontPage) {
     addUiItem(y, UI_LINE_H, ID_FLIP);
     y += UI_LINE_H;
 
-    y += UI_PAD;  // gap before confirm buttons
+    M5.Display.drawString(">", leftX + indent - arrowW, y);
+    M5.Display.drawString("Manage fonts (WiFi)", leftX + indent, y);
+    addUiItem(y, UI_LINE_H, ID_WIFI_MANAGER);
+    y += UI_LINE_H;
+
+    y += UI_PAD;  // gap before confirm
 
     M5.Display.drawString(">", leftX + indent - arrowW, y);
     M5.Display.drawString("Confirm", leftX + indent, y);
@@ -1677,6 +1690,12 @@ void runSetupScreen() {
         else if (id == ID_FLIP) {
             config.flipInterface = !config.flipInterface;
             applyRotation();
+        }
+        else if (id == ID_WIFI_MANAGER) {
+            // Save current config first, then launch WiFi manager
+            saveConfig();
+            runWiFiFontManager();
+            // runWiFiFontManager calls ESP.restart(), so we never return here
         }
         else if (id == ID_FONTS_LINK) {
             // Enter fonts sub-screen (>20 fonts)
@@ -2141,6 +2160,241 @@ void runSplashAndSetup() {
     // Flush any queued touch events (e.g. double-tap on Confirm)
     // so they don't trigger unintended actions in loop()
     for (int i = 0; i < 10; i++) { M5.update(); delay(10); }
+}
+
+// ---- WiFi Font Manager ----
+
+static const char* WIFI_SSID = "PaperSpecimenS3";
+static const char* WIFI_PASS = "seriforsans";
+#define WIFI_TIMEOUT_MS 300000 // 5 minutes
+#define WIFI_CHANNEL 1
+#define DNS_PORT 53
+
+static WebServer wifiServer(80);
+static DNSServer dnsServer;
+static bool wifiManagerDone = false;
+
+void wifiSendCors() {
+    wifiServer.sendHeader("Access-Control-Allow-Origin", "*");
+}
+
+void wifiHandleRoot() {
+    wifiServer.sendHeader("Content-Encoding", "gzip");
+    wifiServer.send_P(200, "text/html", (const char*)INDEX_HTML_GZ, INDEX_HTML_GZ_LEN);
+}
+
+void wifiHandleFonts() {
+    wifiSendCors();
+    String json = "[";
+    File dir = SD.open("/fonts");
+    if (dir) {
+        bool first = true;
+        File entry = dir.openNextFile();
+        while (entry) {
+            String name = String(entry.name());
+            // Skip hidden files (macOS ._files)
+            if (!name.startsWith(".") && (name.endsWith(".ttf") || name.endsWith(".TTF") ||
+                name.endsWith(".otf") || name.endsWith(".OTF"))) {
+                if (!first) json += ",";
+                json += "{\"name\":\"" + name + "\",\"size\":" + String(entry.size()) + "}";
+                first = false;
+            }
+            entry.close();
+            entry = dir.openNextFile();
+        }
+        dir.close();
+    }
+    json += "]";
+    wifiServer.send(200, "application/json", json);
+}
+
+void wifiHandleDelete() {
+    if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
+    // Simple JSON parse for {"name":"filename"}
+    String body = wifiServer.arg("plain");
+    int nameStart = body.indexOf("\"name\"") + 8;
+    int nameEnd = body.indexOf("\"", nameStart);
+    if (nameStart < 8 || nameEnd < 0) { wifiServer.send(400, "text/plain", "Bad request"); return; }
+    String filename = body.substring(nameStart, nameEnd);
+
+    String path = "/fonts/" + filename;
+    if (SD.exists(path.c_str())) {
+        SD.remove(path.c_str());
+        Serial.printf("WiFi: Deleted %s\n", path.c_str());
+        wifiServer.send(200, "text/plain", "OK");
+    } else {
+        wifiServer.send(404, "text/plain", "Not found");
+    }
+}
+
+void wifiHandleRename() {
+    if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
+    String body = wifiServer.arg("plain");
+    // Parse {"name":"old","newName":"new"}
+    int nameStart = body.indexOf("\"name\"") + 8;
+    int nameEnd = body.indexOf("\"", nameStart);
+    int newStart = body.indexOf("\"newName\"") + 11;
+    int newEnd = body.indexOf("\"", newStart);
+    if (nameStart < 8 || newStart < 11) { wifiServer.send(400, "text/plain", "Bad request"); return; }
+    String oldName = body.substring(nameStart, nameEnd);
+    String newName = body.substring(newStart, newEnd);
+
+    String oldPath = "/fonts/" + oldName;
+    String newPath = "/fonts/" + newName;
+    if (SD.exists(oldPath.c_str())) {
+        SD.rename(oldPath.c_str(), newPath.c_str());
+        Serial.printf("WiFi: Renamed %s -> %s\n", oldPath.c_str(), newPath.c_str());
+        wifiServer.send(200, "text/plain", "OK");
+    } else {
+        wifiServer.send(404, "text/plain", "Not found");
+    }
+}
+
+void wifiHandleUpload() {
+    HTTPUpload& upload = wifiServer.upload();
+    static File uploadFile;
+
+    if (upload.status == UPLOAD_FILE_START) {
+        String filename = upload.filename;
+        if (filename.startsWith("/")) filename = filename.substring(1);
+        String path = "/fonts/" + filename;
+        Serial.printf("WiFi: Upload start %s\n", path.c_str());
+        uploadFile = SD.open(path.c_str(), FILE_WRITE);
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        if (uploadFile) {
+            uploadFile.write(upload.buf, upload.currentSize);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (uploadFile) {
+            uploadFile.close();
+            Serial.printf("WiFi: Upload complete (%d bytes)\n", upload.totalSize);
+        }
+    }
+}
+
+void wifiHandleUploadComplete() {
+    wifiServer.send(200, "text/plain", "OK");
+}
+
+void wifiHandleApply() {
+    wifiServer.send(200, "text/plain", "OK");
+    delay(500);
+    wifiManagerDone = true; // signal main loop to exit
+}
+
+void wifiHandleTimeout() {
+    wifiServer.send(200, "text/plain", "OK");
+    delay(200);
+    wifiManagerDone = true;
+}
+
+// Captive portal: redirect all unknown requests to root
+void wifiHandleNotFound() {
+    wifiServer.sendHeader("Location", "http://192.168.4.1/", true);
+    wifiServer.send(302, "text/plain", "");
+}
+
+void runWiFiFontManager() {
+    Serial.println("Starting WiFi Font Manager...");
+
+    // Boost CPU for WiFi
+    setCpuFrequencyMhz(160);
+
+    // Enable WiFi
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP(WIFI_SSID, WIFI_PASS, WIFI_CHANNEL, 0, 4); // max 4 connections
+    delay(500);
+    IPAddress ip = WiFi.softAPIP();
+    Serial.printf("WiFi AP: SSID=%s, IP=%s\n", WIFI_SSID, ip.toString().c_str());
+
+    // Start DNS server for captive portal (redirect all domains to our IP)
+    dnsServer.start(DNS_PORT, "*", ip);
+
+    // Register routes
+    wifiServer.on("/", HTTP_GET, wifiHandleRoot);
+    wifiServer.on("/api/fonts", HTTP_GET, wifiHandleFonts);
+    wifiServer.on("/api/delete", HTTP_POST, wifiHandleDelete);
+    wifiServer.on("/api/rename", HTTP_POST, wifiHandleRename);
+    wifiServer.on("/api/upload", HTTP_POST, wifiHandleUploadComplete, wifiHandleUpload);
+    wifiServer.on("/api/apply", HTTP_GET, wifiHandleApply);
+    wifiServer.on("/api/timeout", HTTP_GET, wifiHandleTimeout);
+    wifiServer.onNotFound(wifiHandleNotFound);
+    wifiServer.begin();
+    Serial.println("Web server started on port 80");
+
+    // Show WiFi info on e-ink display
+    M5.Display.wakeup();
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setFont(&fonts::Font0);
+
+    int cx = displayW / 2;
+    int y = UI_PAD;
+
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("PaperSpecimen S3", cx, y);
+    y += 50;
+
+    M5.Display.drawString("WiFi Font Manager", cx, y);
+    y += 60;
+
+    M5.Display.drawString("SSID:", cx, y);
+    y += 30;
+    M5.Display.drawString(WIFI_SSID, cx, y);
+    y += 50;
+
+    M5.Display.drawString("Password:", cx, y);
+    y += 30;
+    M5.Display.drawString(WIFI_PASS, cx, y);
+    y += 50;
+
+    M5.Display.drawString("Open in browser:", cx, y);
+    y += 30;
+    M5.Display.drawString("paperspecimen.local", cx, y);
+    y += 30;
+    char ipStr[32];
+    snprintf(ipStr, sizeof(ipStr), "(or %s)", ip.toString().c_str());
+    M5.Display.drawString(ipStr, cx, y);
+
+    M5.Display.setTextDatum(bottom_center);
+    M5.Display.drawString(VERSION, cx, displayH - UI_PAD);
+
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    // Run server loop until timeout or user confirms
+    unsigned long startMs = millis();
+    wifiManagerDone = false;
+
+    Serial.printf("WiFi manager active — %ds timeout\n", WIFI_TIMEOUT_MS / 1000);
+    while (!wifiManagerDone && (millis() - startMs < WIFI_TIMEOUT_MS)) {
+        dnsServer.processNextRequest();
+        wifiServer.handleClient();
+        delay(10);
+    }
+    if (wifiManagerDone) {
+        Serial.println("WiFi manager: user confirmed or page timed out");
+    } else {
+        Serial.println("WiFi manager: 5 minute timeout reached");
+    }
+
+    // Cleanup
+    Serial.println("WiFi Font Manager closing...");
+    wifiServer.stop();
+    dnsServer.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    esp_wifi_stop();
+    esp_wifi_deinit();
+
+    // Restore CPU
+    setCpuFrequencyMhz(80);
+
+    Serial.println("WiFi off, restarting...");
+    delay(500);
+    ESP.restart();
 }
 
 // ---- Setup & Loop ----

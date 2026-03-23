@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PaperSpecimen S3 — Font Manager</title>
+<style>
+body { max-width: 650px; margin: 40px auto; padding: 0 20px; font-family: sans-serif; line-height: 1.6; color: #222; }
+h1, h2 { line-height: 1.2; }
+hr { border: none; border-top: 1px solid #ccc; margin: 24px 0; }
+input[type="file"] { margin: 8px 0; }
+input[type="text"] { font-size: inherit; padding: 4px 6px; border: 1px solid #222; width: 100%; max-width: 300px; }
+.rename-row td { padding: 6px 8px; }
+.rename-row input { margin-right: 4px; }
+table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }
+th { font-weight: bold; }
+td.actions { white-space: nowrap; text-align: right; }
+a { color: #222; }
+a:hover { color: #666; }
+button { font-size: inherit; cursor: pointer; background: none; border: 1px solid #222; padding: 4px 10px; margin: 0 2px; }
+button:hover { background: #222; color: #fff; }
+button.apply { font-weight: bold; }
+.new { background: #f0fff0; }
+.delete { background: #fff0f0; text-decoration: line-through; }
+.rename { background: #fffff0; }
+.badge { font-size: 0.85em; color: #666; }
+.pending { position: fixed; bottom: 0; left: 0; right: 0; background: #222; color: #fff; padding: 10px 20px; text-align: center; display: none; }
+.pending.visible { display: block; }
+.pending button { color: #fff; border-color: #fff; }
+.pending button:hover { background: #fff; color: #222; }
+.timeout { font-size: 0.85em; color: #999; }
+#overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); color: #fff; font-size: 1.2em; align-items: center; justify-content: center; text-align: center; }
+#overlay.active { display: flex; }
+</style>
+</head>
+<body>
+
+<h1>PaperSpecimen S3</h1>
+<p>Font Manager — <span class="timeout" id="timer">5:00 remaining</span></p>
+
+<hr>
+
+<h2>Upload fonts</h2>
+<p>Select .ttf files to add to the device.</p>
+<input type="file" id="fileInput" accept=".ttf,.otf" multiple>
+
+<hr>
+
+<h2>Fonts on device <span class="badge" id="fontCount"></span></h2>
+<table>
+<thead><tr><th>Filename</th><th>Size</th><th class="actions">Actions</th></tr></thead>
+<tbody id="fontList"></tbody>
+</table>
+
+<div class="pending" id="changesBar">
+  <span id="changesCount"></span> &nbsp;
+  <button onclick="cancelChanges()">Cancel</button>
+  <button class="apply" onclick="applyChanges()">Apply changes</button>
+</div>
+
+<div id="overlay"><div id="overlayText">Applying changes...</div></div>
+
+<script>
+let fonts = [];
+let timeLeft = 300;
+let timerInterval = null;
+let renamingIndex = -1;
+
+document.addEventListener('DOMContentLoaded', () => { loadFonts(); startTimer(); });
+
+function startTimer() {
+  timeLeft = 300;
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    let m = Math.floor(timeLeft / 60), s = timeLeft % 60;
+    document.getElementById('timer').textContent = m + ':' + String(s).padStart(2, '0') + ' remaining';
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      fetch('/api/timeout').catch(() => {});
+      document.body.innerHTML = '<h1>Session expired</h1><p>The device has returned to normal mode.</p>';
+    }
+  }, 1000);
+}
+
+function resetTimer() { startTimer(); }
+
+async function loadFonts() {
+  try {
+    let res = await fetch('/api/fonts');
+    let data = await res.json();
+    fonts = data.map(f => ({ name: f.name, size: f.size, status: 'existing' }));
+  } catch(e) {
+    fonts = [
+      { name: 'URW-Handel-Gothic-Regular.ttf', size: 22620, status: 'existing' },
+      { name: 'Simoncini-Garamond-Regular.ttf', size: 32584, status: 'existing' },
+      { name: 'FT-Aktual-Book.ttf', size: 362624, status: 'existing' },
+      { name: 'ABC-Ginto-Nord-Black.ttf', size: 147036, status: 'existing' },
+      { name: 'PP-Rader-Regular.ttf', size: 332556, status: 'existing' },
+    ];
+  }
+  render();
+}
+
+function fmtSize(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+function render() {
+  let total = fonts.filter(f => f.status !== 'delete').length;
+  let newCount = fonts.filter(f => f.status === 'new').length;
+  document.getElementById('fontCount').textContent = '(' + total + (newCount ? ' + ' + newCount + ' new' : '') + ')';
+
+  let html = '';
+  if (fonts.length === 0) {
+    html = '<tr><td colspan="3">No fonts found. Upload some .ttf files.</td></tr>';
+  }
+  fonts.forEach((f, i) => {
+    if (renamingIndex === i) {
+      let ext = f.name.split('.').pop();
+      let base = f.name.slice(0, -(ext.length + 1));
+      html += '<tr class="rename-row"><td colspan="2"><input type="text" id="renameInput" value="' + base + '" onkeydown="renameKey(event,' + i + ')"></td>';
+      html += '<td class="actions"><button onclick="confirmRename(' + i + ')">ok</button> <button onclick="cancelRename()">cancel</button></td></tr>';
+      return;
+    }
+    let cls = f.status === 'new' ? 'new' : f.status === 'delete' ? 'delete' : f.status === 'rename' ? 'rename' : '';
+    let name = f.name;
+    if (f.status === 'rename') name = f.name + ' &rarr; ' + f.newName;
+    let acts = '';
+    if (f.status === 'existing') {
+      acts = '<button onclick="doRename(' + i + ')">rename</button> <button onclick="doDelete(' + i + ')">delete</button>';
+    } else if (f.status === 'new') {
+      acts = '<button onclick="doRemoveNew(' + i + ')">remove</button>';
+    } else {
+      acts = '<button onclick="doUndo(' + i + ')">undo</button>';
+    }
+    html += '<tr class="' + cls + '"><td>' + name + '</td><td>' + fmtSize(f.size) + '</td><td class="actions">' + acts + '</td></tr>';
+  });
+  document.getElementById('fontList').innerHTML = html;
+
+  let pending = fonts.filter(f => f.status !== 'existing').length;
+  let bar = document.getElementById('changesBar');
+  if (pending > 0) {
+    bar.classList.add('visible');
+    document.getElementById('changesCount').textContent = pending + (pending === 1 ? ' change' : ' changes');
+  } else {
+    bar.classList.remove('visible');
+  }
+}
+
+function doDelete(i) { resetTimer(); fonts[i].status = 'delete'; render(); }
+function doUndo(i) { resetTimer(); fonts[i].status = 'existing'; delete fonts[i].newName; render(); }
+function doRemoveNew(i) { resetTimer(); fonts.splice(i, 1); render(); }
+
+function doRename(i) {
+  resetTimer();
+  renamingIndex = i;
+  render();
+  setTimeout(() => {
+    let inp = document.getElementById('renameInput');
+    if (inp) { inp.focus(); inp.select(); }
+  }, 50);
+}
+
+function confirmRename(i) {
+  let inp = document.getElementById('renameInput');
+  if (!inp) return;
+  let newName = inp.value.trim();
+  if (!newName) { cancelRename(); return; }
+  let ext = fonts[i].name.split('.').pop();
+  if (!newName.toLowerCase().endsWith('.' + ext.toLowerCase())) newName += '.' + ext;
+  if (newName !== fonts[i].name) {
+    fonts[i].status = 'rename';
+    fonts[i].newName = newName;
+  }
+  renamingIndex = -1;
+  render();
+}
+
+function cancelRename() {
+  renamingIndex = -1;
+  render();
+}
+
+function renameKey(e, i) {
+  if (e.key === 'Enter') confirmRename(i);
+  if (e.key === 'Escape') cancelRename();
+}
+
+document.getElementById('fileInput').addEventListener('change', function() {
+  resetTimer();
+  for (let file of this.files) {
+    if (!file.name.match(/\.(ttf|otf)$/i)) { alert('Only .ttf and .otf files'); continue; }
+    if (fonts.some(f => f.name === file.name && f.status !== 'delete')) { alert(file.name + ' already exists'); continue; }
+    fonts.push({ name: file.name, size: file.size, status: 'new', file: file });
+  }
+  this.value = '';
+  render();
+});
+
+function cancelChanges() {
+  resetTimer();
+  fonts = fonts.filter(f => f.status !== 'new');
+  fonts.forEach(f => { f.status = 'existing'; delete f.newName; });
+  render();
+}
+
+async function applyChanges() {
+  let pending = fonts.filter(f => f.status !== 'existing');
+  if (pending.length === 0) return;
+  let ov = document.getElementById('overlay');
+  let txt = document.getElementById('overlayText');
+  ov.classList.add('active');
+
+  try {
+    for (let f of fonts.filter(f => f.status === 'delete')) {
+      txt.textContent = 'Deleting ' + f.name + '...';
+      await fetch('/api/delete', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name:f.name}) });
+    }
+    for (let f of fonts.filter(f => f.status === 'rename')) {
+      txt.textContent = 'Renaming ' + f.name + '...';
+      await fetch('/api/rename', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name:f.name, newName:f.newName}) });
+    }
+    for (let f of fonts.filter(f => f.status === 'new')) {
+      txt.textContent = 'Uploading ' + f.name + '...';
+      let fd = new FormData(); fd.append('file', f.file);
+      await fetch('/api/upload', { method: 'POST', body: fd });
+    }
+    txt.textContent = 'Restarting device...';
+    await fetch('/api/apply').catch(() => {});
+    await new Promise(r => setTimeout(r, 1000));
+    document.body.innerHTML = '<h1>Done</h1><p>Changes applied. The device is restarting. You can close this page.</p>';
+  } catch(e) {
+    ov.classList.remove('active');
+    alert('Error: ' + e.message);
+  }
+}
+</script>
+</body>
+</html>

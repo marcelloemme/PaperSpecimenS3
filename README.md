@@ -2,7 +2,7 @@
 
 A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType fonts from an SD card and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
 
-![Version](https://img.shields.io/badge/version-3.4.1-blue)
+![Version](https://img.shields.io/badge/version-4.0.0-blue)
 
 ## Hardware
 
@@ -25,6 +25,7 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 - **Setup UI**: on-device configuration with touch-based menu
 - **Font management**: supports up to 100 TrueType fonts, enable/disable individually
 - **Unicode range selection**: 28 configurable ranges (Basic Latin through Latin Extended Additional)
+- **WiFi font manager**: upload, rename, and delete fonts wirelessly from any browser — no SD card removal needed
 - **Flip interface**: rotate display 180° for lanyard/inverted mounting
 - **Debug mode**: serial logging, battery drain tracking, faster timer options
 - **Battery monitoring**: automatic shutdown at 5% with low-battery icon
@@ -53,7 +54,7 @@ Place your `.ttf` font files in a `/fonts` directory on the SD card root. The de
 
 ### Option A: Flash Pre-built Binary
 
-A pre-built binary is available in the repository root: `PaperSpecimenS3_v3.4.2.bin`
+A pre-built binary is available in the repository root: `PaperSpecimenS3_v4.0.0.bin`
 
 ```bash
 # Install esptool if not already available
@@ -61,7 +62,7 @@ pip install esptool
 
 # Flash the binary (replace /dev/ttyUSB0 with your serial port)
 esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 \
-  write_flash 0x10000 PaperSpecimenS3_v3.4.2.bin
+  write_flash 0x10000 PaperSpecimenS3_v4.0.0.bin
 ```
 
 On macOS the port is typically `/dev/cu.usbmodem*`. On Windows it is `COM3` or similar.
@@ -157,6 +158,22 @@ The first 6 ranges (Basic Latin through IPA Extensions) are enabled by default.
 
 ### Flip Interface
 Tap `> Flip interface` to rotate the entire UI 180°. Useful when wearing the M5Paper S3 on a lanyard (the device hangs upside down). The flip state is saved and persisted across reboots.
+
+### Manage Fonts (WiFi)
+Tap `> Manage fonts (WiFi)` to launch a wireless font manager. The device creates a WiFi access point and serves a web-based interface for managing fonts without removing the SD card:
+
+- **SSID**: `PaperSpecimenS3`
+- **Password**: `seriforsans`
+- **URL**: `paperspecimen.local` or `192.168.4.1`
+
+From any phone or computer connected to the WiFi, open a browser to access the font manager. You can:
+- **Upload** new .ttf/.otf font files directly to the device
+- **Rename** existing fonts
+- **Delete** fonts you no longer need
+
+All changes are staged as a preview — nothing is written to the SD card until you tap "Apply changes". After applying, the device restarts automatically with the updated font library.
+
+The WiFi session has a 5-minute timeout. If no action is taken, the device exits WiFi mode and restarts. The CPU is temporarily boosted to 160 MHz while WiFi is active, then returns to 80 MHz on exit.
 
 ### Confirm
 Tap `> Confirm` to save the configuration and start displaying glyphs. The setup auto-confirms after 60 seconds of inactivity.

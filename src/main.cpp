@@ -1817,6 +1817,7 @@ uint32_t rtcToSeconds() {
 // Also stores the expected wake time in lastExpectedWakeSec for anchored sleep calc
 // Reads last_font and last_mode in the same NVS open to avoid reopening later
 static uint32_t lastExpectedWakeSec = 0;
+static uint32_t earlyBootRtcSec = 0; // captured immediately after M5.begin, before slow ops
 static int nvsLastFont = 0;
 static int nvsLastMode = VIEW_BITMAP;
 
@@ -1836,7 +1837,9 @@ int checkWakeReason() {
     prefs.putBool("sleeping", false);
     prefs.end();
 
-    uint32_t nowSec = rtcToSeconds();
+    // Use earlyBootRtcSec captured right after M5.begin, not the current time
+    // (scanFonts with 100 fonts can take 5-10s and would skew the diff)
+    uint32_t nowSec = earlyBootRtcSec;
 
     // Calculate difference handling midnight wrap
     int32_t diff = (int32_t)nowSec - (int32_t)lastExpectedWakeSec;
@@ -1845,7 +1848,7 @@ int checkWakeReason() {
 
     // RTC alarm fires at exact HH:MM:00, boot takes ~2-3s, so timer wake
     // diff is always +2-5s. Any wake more than 5s off is a manual button press.
-    #define WAKE_TOLERANCE_S 5
+    #define WAKE_TOLERANCE_S 4
     int result;
     if (abs(diff) <= WAKE_TOLERANCE_S) {
         result = 1; // timer wake
@@ -2196,12 +2199,14 @@ void setup() {
     }
     if (earlyDebug) Serial.printf("Board: %d\n", M5.getBoard());
 
-    // Log RTC time immediately after M5.begin for wake debug
+    // Capture RTC time IMMEDIATELY after M5.begin, before any slow operations
+    // (scanFonts with 100 fonts can take 5-10s, which would skew wake detection)
     {
         m5::rtc_time_t t;
         m5::rtc_date_t d;
         M5.Rtc.getTime(&t);
         M5.Rtc.getDate(&d);
+        earlyBootRtcSec = t.hours * 3600 + t.minutes * 60 + t.seconds;
         Serial.printf("RTC at boot: %04d-%02d-%02d %02d:%02d:%02d\n",
                       d.year, d.month, d.date, t.hours, t.minutes, t.seconds);
     }

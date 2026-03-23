@@ -1,6 +1,6 @@
 # PaperSpecimen S3
 
-A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType fonts from an SD card and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
+A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType fonts and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. Fonts are automatically cached to internal flash storage (~12 MB) for SD-free operation — the SD card is only needed for initial font loading and WiFi font management. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
 
 
 ## Hardware
@@ -35,8 +35,8 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 ### Prerequisites
 
 - [PlatformIO](https://platformio.org/) (VSCode extension or CLI)
-- M5Paper S3 with MicroSD card
-- TrueType font files (.ttf)
+- M5Paper S3 with MicroSD card (for initial font loading)
+- TrueType font files (.ttf or .otf)
 
 ### SD Card Structure
 
@@ -49,11 +49,11 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 └── paperspecimen.cfg    (created automatically after first setup)
 ```
 
-Place your `.ttf` font files in a `/fonts` directory on the SD card root. The device will scan this directory on each boot. At least one font is required.
+Place your `.ttf` font files in a `/fonts` directory on the SD card root. On first setup, the device copies all fonts to internal flash storage (~12 MB available). If the total font size fits within this limit, the SD card is no longer needed and can be removed — the device operates entirely from flash, saving power. If fonts exceed 12 MB, the device falls back to reading from SD.
 
 ### Option A: Flash Pre-built Binary
 
-A pre-built binary is available in the repository root: `PaperSpecimenS3_v4.0.1.bin`
+A pre-built binary is available in the repository root: `PaperSpecimenS3_v4.1.1.bin`
 
 ```bash
 # Install esptool if not already available
@@ -61,7 +61,7 @@ pip install esptool
 
 # Flash the binary (replace /dev/ttyUSB0 with your serial port)
 esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 \
-  write_flash 0x10000 PaperSpecimenS3_v4.0.1.bin
+  write_flash 0x10000 PaperSpecimenS3_v4.1.1.bin
 ```
 
 On macOS the port is typically `/dev/cu.usbmodem*`. On Windows it is `COM3` or similar.
@@ -238,7 +238,7 @@ Each glyph screen shows:
 ### Automatic Wake (Timer)
 The device uses the BM8563 RTC alarm to wake at precise intervals. Each wake cycle:
 1. Powers on (~3 seconds boot)
-2. Loads configuration from SD
+2. Loads configuration from flash (or SD if fonts exceed flash capacity)
 3. Detects wake type (timer vs manual, using 4-second tolerance)
 4. Selects random font/mode (if allowed by config)
 5. Selects random glyph from enabled Unicode ranges
@@ -277,7 +277,7 @@ Pressing the physical button wakes the device before the timer expires. The devi
 
 ## Configuration File
 
-Settings are stored in `/paperspecimen.cfg` on the SD card as plain text:
+Settings are stored in `/.paperspecimen.cfg` (hidden file) on internal flash or SD card as plain text:
 
 ```
 15                  ← wake interval (minutes)
@@ -303,7 +303,8 @@ Settings are stored in `/paperspecimen.cfg` on the SD card as plain text:
 - Serial disabled in normal mode (no USB CDC overhead)
 - Touch controller disabled during timer wake
 - E-ink display controller put to sleep 3 seconds after last full refresh
-- SD card bus closed after font loading (normal mode timer wake)
+- Fonts cached to internal flash (~12 MB) — SD card not needed after initial setup
+- SD card bus fully powered off when fonts are in flash
 - Touch polling at 50 Hz (20ms interval)
 - `pushGrayscaleImage` for efficient bitmap transfers (vs pixel-by-pixel)
 - Blank glyph detection via `FT_LOAD_NO_SCALE` (avoids unnecessary rendering)

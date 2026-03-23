@@ -3,6 +3,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <Preferences.h>
+#include <LittleFS.h>
 #include <esp_wifi.h>
 #include <esp_bt.h>
 #include <WiFi.h>
@@ -17,8 +18,14 @@
 #include FT_OUTLINE_H
 #include FT_BBOX_H
 
-// PaperSpecimen S3 - v4.0.1
-static const char* VERSION = "v4.0.1";
+// PaperSpecimen S3 - v4.1.0
+static const char* VERSION = "v4.1.1";
+
+// Flash font storage threshold (11.5MB)
+#define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
+// Flag: are fonts stored in flash (LittleFS) or SD?
+static bool fontsInFlash = false;
+static bool flashInitialized = false;
 
 // Forward declarations
 void runWiFiFontManager();
@@ -36,7 +43,7 @@ void runWiFiFontManager();
 // Uniform padding for UI and glyph labels
 #define UI_PAD       30
 // Config file path
-#define CONFIG_FILE "/paperspecimen.cfg"
+#define CONFIG_FILE "/.paperspecimen.cfg"
 
 // Max fonts (used by config and font list)
 #define MAX_FONTS 100
@@ -116,11 +123,33 @@ void initDefaultConfig() {
     for (int i = 0; i < NUM_GLYPH_RANGES; i++) config.rangeEnabled[i] = (i < 6);
 }
 
-bool loadConfig() {
-    if (!SD.exists(CONFIG_FILE)) return false;
+// Open a file from the active filesystem (flash or SD)
+File openFromStorage(const char* path, const char* mode) {
+    if (fontsInFlash && flashInitialized) {
+        return LittleFS.open(path, mode);
+    }
+    return SD.open(path, mode);
+}
 
-    File f = SD.open(CONFIG_FILE, FILE_READ);
-    if (!f) return false;
+bool storageExists(const char* path) {
+    if (fontsInFlash && flashInitialized) {
+        return LittleFS.exists(path);
+    }
+    return SD.exists(path);
+}
+
+bool loadConfig() {
+    Serial.printf("loadConfig: fontsInFlash=%d, flashInitialized=%d\n", fontsInFlash, flashInitialized);
+    if (!storageExists(CONFIG_FILE)) {
+        Serial.println("loadConfig: config file not found");
+        return false;
+    }
+
+    File f = openFromStorage(CONFIG_FILE, FILE_READ);
+    if (!f) {
+        Serial.println("loadConfig: failed to open config file");
+        return false;
+    }
 
     String line = f.readStringUntil('\n'); line.trim();
     config.wakeIntervalMinutes = line.toInt();
@@ -163,7 +192,7 @@ bool loadConfig() {
 bool saveConfig() {
     M5.Display.waitDisplay();
 
-    File f = SD.open(CONFIG_FILE, FILE_WRITE);
+    File f = openFromStorage(CONFIG_FILE, FILE_WRITE);
     if (!f) { Serial.println("ERROR: Can't write config"); return false; }
 
     f.println(config.wakeIntervalMinutes);
@@ -264,10 +293,11 @@ bool isValidFontFile(const char* name) {
     return n.endsWith(".ttf") || n.endsWith(".otf");
 }
 
-int scanFonts() {
-    File dir = SD.open("/fonts");
+// Scan fonts from a given filesystem (SD or LittleFS)
+int scanFontsFrom(fs::FS &fs, const char* label) {
+    File dir = fs.open("/fonts");
     if (!dir || !dir.isDirectory()) {
-        Serial.println("ERROR: /fonts directory not found");
+        Serial.printf("[%s] /fonts directory not found\n", label);
         return 0;
     }
 
@@ -290,16 +320,166 @@ int scanFonts() {
     return fontCount;
 }
 
+int scanFonts() {
+    if (fontsInFlash && flashInitialized) {
+        return scanFontsFrom(LittleFS, "Flash");
+    } else {
+        return scanFontsFrom(SD, "SD");
+    }
+}
+
+// Calculate total size of fonts on SD
+size_t calcSDFontsSize() {
+    File dir = SD.open("/fonts");
+    if (!dir || !dir.isDirectory()) return 0;
+    size_t total = 0;
+    File entry;
+    while ((entry = dir.openNextFile())) {
+        const char* name = entry.name();
+        if (!entry.isDirectory() && isValidFontFile(name)) {
+            total += entry.size();
+        }
+        entry.close();
+    }
+    dir.close();
+    return total;
+}
+
+// Copy all fonts from SD to flash (LittleFS)
+bool copyFontsToFlash() {
+    if (!flashInitialized) {
+        if (!LittleFS.begin(true)) { // format if needed
+            Serial.println("LittleFS init failed");
+            return false;
+        }
+        flashInitialized = true;
+    }
+
+    // Create /fonts dir on flash
+    LittleFS.mkdir("/fonts");
+
+    // First: remove old fonts from flash that no longer exist on SD
+    File flashDir = LittleFS.open("/fonts");
+    if (flashDir && flashDir.isDirectory()) {
+        File fe;
+        while ((fe = flashDir.openNextFile())) {
+            String flashName = String(fe.name());
+            fe.close();
+            // Check if this font still exists on SD
+            String sdPath = "/fonts/" + flashName;
+            File sdCheck = SD.open(sdPath);
+            if (!sdCheck) {
+                String delPath = "/fonts/" + flashName;
+                LittleFS.remove(delPath);
+                Serial.printf("  Removed from flash: %s\n", flashName.c_str());
+            } else {
+                sdCheck.close();
+            }
+        }
+        flashDir.close();
+    }
+
+    // Copy fonts from SD to flash
+    File dir = SD.open("/fonts");
+    if (!dir || !dir.isDirectory()) return false;
+
+    File entry;
+    int copied = 0;
+    while ((entry = dir.openNextFile())) {
+        const char* name = entry.name();
+        if (!entry.isDirectory() && isValidFontFile(name)) {
+            String destPath = String("/fonts/") + name;
+            size_t fileSize = entry.size();
+
+            // Read SD file into PSRAM (needed for both comparison and copy)
+            uint8_t* buf = (uint8_t*)ps_malloc(fileSize);
+            if (!buf) {
+                Serial.printf("  PSRAM alloc failed for %s (%d bytes)\n", name, fileSize);
+                entry.close();
+                continue;
+            }
+            entry.read(buf, fileSize);
+            entry.close();
+
+            // Compare with existing flash file: same size + same first/last 64 bytes
+            File existing = LittleFS.open(destPath, FILE_READ);
+            if (existing && existing.size() == fileSize && fileSize > 0) {
+                bool same = true;
+                // Check first 64 bytes
+                int checkLen = (fileSize < 64) ? fileSize : 64;
+                uint8_t cmpBuf[64];
+                existing.read(cmpBuf, checkLen);
+                if (memcmp(buf, cmpBuf, checkLen) != 0) same = false;
+                // Check last 64 bytes (if file is large enough)
+                if (same && fileSize > 128) {
+                    existing.seek(fileSize - 64);
+                    existing.read(cmpBuf, 64);
+                    if (memcmp(buf + fileSize - 64, cmpBuf, 64) != 0) same = false;
+                }
+                existing.close();
+                if (same) {
+                    free(buf);
+                    Serial.printf("  Skip (unchanged): %s\n", name);
+                    continue;
+                }
+            }
+            if (existing) existing.close();
+
+            File dest = LittleFS.open(destPath, FILE_WRITE);
+            if (dest) {
+                dest.write(buf, fileSize);
+                dest.close();
+                copied++;
+                Serial.printf("  Copied to flash: %s (%d bytes)\n", name, fileSize);
+            } else {
+                Serial.printf("  Failed to write: %s\n", name);
+            }
+            free(buf);
+        } else {
+            entry.close();
+        }
+    }
+    dir.close();
+    Serial.printf("Flash copy done: %d fonts copied\n", copied);
+    return true;
+}
+
+// Copy config from SD to flash
+void copyConfigToFlash() {
+    File src = SD.open(CONFIG_FILE, FILE_READ);
+    if (!src) return;
+    size_t sz = src.size();
+    uint8_t* buf = (uint8_t*)ps_malloc(sz);
+    if (buf) {
+        src.read(buf, sz);
+        src.close();
+        File dst = LittleFS.open(CONFIG_FILE, FILE_WRITE);
+        if (dst) {
+            dst.write(buf, sz);
+            dst.close();
+            Serial.println("Config copied to flash");
+        }
+        free(buf);
+    } else {
+        src.close();
+    }
+}
+
 // ---- FreeType ----
 
 bool loadFontToMemory(int index) {
     if (ftFace) { FT_Done_Face(ftFace); ftFace = nullptr; }
     if (fontBuffer) { free(fontBuffer); fontBuffer = nullptr; }
 
-    // Wait for any pending display refresh before accessing SD
+    // Wait for any pending display refresh before accessing storage
     M5.Display.waitDisplay();
 
-    File f = SD.open(fontPaths[index], FILE_READ);
+    File f;
+    if (fontsInFlash && flashInitialized) {
+        f = LittleFS.open(fontPaths[index], FILE_READ);
+    } else {
+        f = SD.open(fontPaths[index], FILE_READ);
+    }
     if (!f) {
         Serial.printf("Failed to open: %s\n", fontPaths[index].c_str());
         return false;
@@ -1892,6 +2072,21 @@ int checkWakeReason() {
 void logBatteryDebug(uint32_t codepoint, const char* wakeType) {
     if (!debugMode) return;
 
+    // If fonts are in flash, we need to init SD just for the log
+    // Skip if SD is not physically present (avoid SPI conflicts)
+    bool sdWasOff = false;
+    if (fontsInFlash) {
+        SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+        if (SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+            sdWasOff = true;
+        } else {
+            SD.end();
+            SPI.end();
+            Serial.println("SD not available for battery log — skipping");
+            return;
+        }
+    }
+
     m5::rtc_time_t t;
     M5.Rtc.getTime(&t);
 
@@ -1911,16 +2106,37 @@ void logBatteryDebug(uint32_t codepoint, const char* wakeType) {
         logf.close();
         Serial.println("Battery log written to /battery_log.txt");
     }
+
+    // Close SD again if we opened it just for the log
+    if (sdWasOff) {
+        SD.end();
+        SPI.end();
+    }
 }
 
 // Append an empty line to the battery log (separates manual wake sessions)
 void logBatteryBlankLine() {
     if (!debugMode) return;
+
+    bool sdWasOff = false;
+    if (fontsInFlash) {
+        SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+        if (SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+            sdWasOff = true;
+        } else {
+            SD.end();
+            SPI.end();
+            return;
+        }
+    }
+
     File logf = SD.open("/battery_log.txt", FILE_APPEND);
     if (logf) {
         logf.println();
         logf.close();
     }
+
+    if (sdWasOff) { SD.end(); SPI.end(); }
 }
 
 void doSleepAt(uint32_t wakeTargetSec) {
@@ -1937,8 +2153,12 @@ void doSleepAt(uint32_t wakeTargetSec) {
     if (fontBuffer) { free(fontBuffer); fontBuffer = nullptr; }
     if (ftLibrary) { FT_Done_FreeType(ftLibrary); ftLibrary = nullptr; }
 
-    // Cleanly close SD card
-    SD.end();
+    // Cleanly close storage
+    if (fontsInFlash && flashInitialized) {
+        LittleFS.end();
+    } else {
+        SD.end();
+    }
 
     uint32_t nowSec = rtcToSeconds();
     Serial.printf("Now %02d:%02d:%02d, wake alarm set for %02d:%02d:00\n",
@@ -2116,6 +2336,7 @@ void runSplashAndSetup() {
     M5.Display.display();
     M5.Display.waitDisplay();
 
+    // --- Splash: 5 seconds for debug mode tap detection ---
     int tapCount = 0;
     unsigned long splashStart = millis();
     while (millis() - splashStart < 5000) {
@@ -2140,6 +2361,87 @@ void runSplashAndSetup() {
         // Sanitize: if timer was set to debug-only value, reset to default
         if (config.wakeIntervalMinutes < 5) config.wakeIntervalMinutes = 15;
     }
+
+    // --- After splash: copy fonts from SD to flash if they fit ---
+    bool sdHasFonts = false;
+    {
+        File testDir = SD.open("/fonts");
+        if (testDir && testDir.isDirectory()) {
+            sdHasFonts = true;
+            testDir.close();
+        }
+    }
+
+    if (sdHasFonts) {
+        size_t totalFontSize = calcSDFontsSize();
+        Serial.printf("SD fonts total size: %d bytes (%.1f MB), flash limit: %.1f MB\n",
+                      totalFontSize, totalFontSize / 1048576.0, FLASH_FONT_MAX_BYTES / 1048576.0);
+
+        if (totalFontSize > 0 && totalFontSize <= FLASH_FONT_MAX_BYTES) {
+            Serial.println("Fonts fit in flash — copying...");
+            if (copyFontsToFlash()) {
+                // Also copy config if it exists on SD
+                if (SD.exists(CONFIG_FILE)) {
+                    copyConfigToFlash();
+                }
+                fontsInFlash = true;
+                Serial.println("Flash copy complete — SD can be powered off");
+            }
+        } else if (totalFontSize > FLASH_FONT_MAX_BYTES) {
+            Serial.printf("Fonts too large for flash (%d > %d) — using SD\n",
+                          totalFontSize, (int)FLASH_FONT_MAX_BYTES);
+            fontsInFlash = false;
+
+            // Clean up flash to free space (old fonts no longer needed)
+            if (!flashInitialized && LittleFS.begin(true)) {
+                flashInitialized = true;
+            }
+            if (flashInitialized) {
+                File fdir = LittleFS.open("/fonts");
+                if (fdir && fdir.isDirectory()) {
+                    File fe;
+                    while ((fe = fdir.openNextFile())) {
+                        String delPath = String("/fonts/") + fe.name();
+                        fe.close();
+                        LittleFS.remove(delPath);
+                    }
+                    fdir.close();
+                }
+                LittleFS.remove(CONFIG_FILE);
+                Serial.println("Flash storage cleared (fonts moved to SD)");
+                LittleFS.end();
+                flashInitialized = false;
+            }
+        }
+    } else {
+        // No SD or no fonts on SD — check if flash has fonts from before
+        if (!flashInitialized && LittleFS.begin(false)) {
+            flashInitialized = true;
+            File testFlash = LittleFS.open("/fonts");
+            if (testFlash && testFlash.isDirectory()) {
+                fontsInFlash = true;
+                Serial.println("No SD fonts — using existing flash fonts");
+            }
+            if (testFlash) testFlash.close();
+        }
+    }
+
+    // Save flash state to NVS
+    {
+        Preferences prefs;
+        prefs.begin("ps3", false);
+        prefs.putBool("fonts_flash", fontsInFlash);
+        prefs.end();
+    }
+
+    // If fonts are in flash, we can close SD now
+    if (fontsInFlash) {
+        SD.end();
+        Serial.println("SD card powered off");
+    }
+
+    // Scan fonts from the active source (flash or SD)
+    scanFonts();
 
     // Run setup screen
     setupFirstRender = true;
@@ -2299,6 +2601,17 @@ void wifiHandleNotFound() {
 
 void runWiFiFontManager() {
     Serial.println("Starting WiFi Font Manager...");
+
+    // Ensure SD is available for WiFi file operations
+    // (even if fonts are in flash, WiFi manager always shows SD content)
+    if (fontsInFlash) {
+        SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+        if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+            Serial.println("WARNING: SD not available for WiFi manager");
+        } else {
+            Serial.println("SD re-initialized for WiFi manager");
+        }
+    }
 
     // Boost CPU for WiFi
     setCpuFrequencyMhz(160);
@@ -2600,20 +2913,43 @@ void setup() {
         }
     }
 
-    // SD Card
-    SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
-    if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
-        Serial.println("SD CARD ERROR");
-        M5.Display.fillScreen(TFT_WHITE);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        M5.Display.setFont(&fonts::Font0);
-        M5.Display.setTextSize(2);
-        M5.Display.setTextDatum(top_center);
-        M5.Display.drawString("SD CARD ERROR", displayW / 2, displayH / 2);
-        M5.Display.display();
-        return;
+    // Check NVS for flash font flag (set during splash/setup)
+    {
+        Preferences prefs;
+        prefs.begin("ps3", true);
+        fontsInFlash = prefs.getBool("fonts_flash", false);
+        prefs.end();
     }
-    Serial.println("SD Card: OK");
+
+    // Initialize storage based on where fonts are
+    if (fontsInFlash) {
+        // Try flash first
+        if (LittleFS.begin(false)) { // don't format
+            flashInitialized = true;
+            Serial.println("LittleFS: OK (fonts in flash)");
+        } else {
+            // Flash failed — fall back to SD
+            Serial.println("LittleFS failed — falling back to SD");
+            fontsInFlash = false;
+        }
+    }
+
+    if (!fontsInFlash) {
+        // Need SD
+        SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+        if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+            Serial.println("SD CARD ERROR");
+            M5.Display.fillScreen(TFT_WHITE);
+            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            M5.Display.setFont(&fonts::Font0);
+            M5.Display.setTextSize(2);
+            M5.Display.setTextDatum(top_center);
+            M5.Display.drawString("SD CARD ERROR", displayW / 2, displayH / 2);
+            M5.Display.display();
+            return;
+        }
+        Serial.println("SD Card: OK");
+    }
 
     int count = scanFonts();
     if (count == 0) {
@@ -2688,9 +3024,9 @@ void setup() {
                       currentViewMode == VIEW_BITMAP ? "BITMAP" : "OUTLINE");
 
         if (loadFontToMemory(currentFontIndex)) {
-            // In normal mode, close SD immediately after font is in PSRAM
+            // In normal mode, close storage immediately after font is in PSRAM
             // saves SPI bus power during rendering and sleep
-            if (!debugMode) {
+            if (!debugMode && !fontsInFlash) {
                 SD.end();
                 Serial.println("SD closed early (normal mode)");
             }
@@ -2749,6 +3085,15 @@ void setup() {
     } else {
         // ---- FIRST BOOT: splash + setup + first glyph ----
         Serial.println("First boot — setup screen");
+
+        // Ensure SD is available for splash font scan (even if fonts were in flash before)
+        if (fontsInFlash) {
+            SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+            if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+                Serial.println("SD not available — using flash fonts only");
+            }
+        }
+
         runSplashAndSetup();
         // Fall through to loop() for interactive mode + inactivity sleep
     }

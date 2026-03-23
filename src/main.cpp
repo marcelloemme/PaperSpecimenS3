@@ -17,8 +17,8 @@
 #include FT_OUTLINE_H
 #include FT_BBOX_H
 
-// PaperSpecimen S3 - v4.0.0
-static const char* VERSION = "v4.0.0";
+// PaperSpecimen S3 - v4.0.1
+static const char* VERSION = "v4.0.1";
 
 // Forward declarations
 void runWiFiFontManager();
@@ -2330,35 +2330,47 @@ void runWiFiFontManager() {
     M5.Display.setFont(&fonts::Font0);
 
     int cx = displayW / 2;
-    int y = UI_PAD;
 
+    // Title at top, version at bottom (fixed)
     M5.Display.setTextDatum(top_center);
-    M5.Display.drawString("PaperSpecimen S3", cx, y);
-    y += 50;
+    M5.Display.drawString("PaperSpecimen S3", cx, UI_PAD);
+    M5.Display.setTextDatum(bottom_center);
+    M5.Display.drawString(VERSION, cx, displayH - UI_PAD);
 
-    M5.Display.drawString("WiFi Font Manager", cx, y);
-    y += 60;
+    // Center content vertically between title and version
+    // Content: timer line + blank + SSID label + SSID + blank + Pass label + Pass + blank + URL label + URL + fallback
+    int lineH = 30;
+    int gapH = 20;
+    int contentH = lineH * 8 + gapH * 3; // 8 text lines + 3 gaps
+    int titleBottom = UI_PAD + 16;
+    int versionTop = displayH - UI_PAD - 16;
+    int areaH = versionTop - titleBottom;
+    int startY = titleBottom + (areaH - contentH) / 2;
+
+    int y = startY;
+    // Timer line Y — we'll update this area every second
+    int timerY = y;
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("WiFi Font Manager - 5m 00s", cx, timerY);
+    y += lineH + gapH;
 
     M5.Display.drawString("SSID:", cx, y);
-    y += 30;
+    y += lineH;
     M5.Display.drawString(WIFI_SSID, cx, y);
-    y += 50;
+    y += lineH + gapH;
 
     M5.Display.drawString("Password:", cx, y);
-    y += 30;
+    y += lineH;
     M5.Display.drawString(WIFI_PASS, cx, y);
-    y += 50;
+    y += lineH + gapH;
 
     M5.Display.drawString("Open in browser:", cx, y);
-    y += 30;
+    y += lineH;
     M5.Display.drawString("paperspecimen.local", cx, y);
-    y += 30;
+    y += lineH;
     char ipStr[32];
     snprintf(ipStr, sizeof(ipStr), "(or %s)", ip.toString().c_str());
     M5.Display.drawString(ipStr, cx, y);
-
-    M5.Display.setTextDatum(bottom_center);
-    M5.Display.drawString(VERSION, cx, displayH - UI_PAD);
 
     M5.Display.setEpdMode(epd_mode_t::epd_quality);
     M5.Display.display();
@@ -2367,11 +2379,43 @@ void runWiFiFontManager() {
     // Run server loop until timeout or user confirms
     unsigned long startMs = millis();
     wifiManagerDone = false;
+    int lastDisplayedSecond = -1;
+    int fullRefreshCounter = 0;
 
     Serial.printf("WiFi manager active — %ds timeout\n", WIFI_TIMEOUT_MS / 1000);
     while (!wifiManagerDone && (millis() - startMs < WIFI_TIMEOUT_MS)) {
         dnsServer.processNextRequest();
         wifiServer.handleClient();
+
+        // Update countdown on e-ink every second
+        int elapsed = (millis() - startMs) / 1000;
+        int remaining = (WIFI_TIMEOUT_MS / 1000) - elapsed;
+        if (remaining < 0) remaining = 0;
+
+        if (remaining != lastDisplayedSecond) {
+            lastDisplayedSecond = remaining;
+            int mins = remaining / 60;
+            int secs = remaining % 60;
+            char timerStr[48];
+            snprintf(timerStr, sizeof(timerStr), "WiFi Font Manager - %dm %02ds", mins, secs);
+
+            // Clear timer area and redraw
+            M5.Display.fillRect(0, timerY, displayW, lineH, TFT_WHITE);
+            M5.Display.setTextDatum(top_center);
+            M5.Display.drawString(timerStr, cx, timerY);
+
+            // Every 10s use epd_text for cleaner refresh, otherwise epd_fastest
+            fullRefreshCounter++;
+            if (fullRefreshCounter >= 10) {
+                M5.Display.setEpdMode(epd_mode_t::epd_text);
+                fullRefreshCounter = 0;
+            } else {
+                M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+            }
+            M5.Display.display();
+            M5.Display.waitDisplay();
+        }
+
         delay(10);
     }
     if (wifiManagerDone) {

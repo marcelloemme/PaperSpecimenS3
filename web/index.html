@@ -29,7 +29,6 @@ button.apply { font-weight: bold; }
 .pending.visible { display: block; }
 .pending button { color: #fff; border-color: #fff; }
 .pending button:hover { background: #fff; color: #222; }
-.timeout { font-size: 0.85em; color: #999; }
 #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); color: #fff; font-size: 1.2em; align-items: center; justify-content: center; text-align: center; }
 #overlay.active { display: flex; }
 </style>
@@ -37,7 +36,7 @@ button.apply { font-weight: bold; }
 <body>
 
 <h1>PaperSpecimen S3</h1>
-<p>Font Manager — <span class="timeout" id="timer">5:00 remaining</span></p>
+<p>Font Manager</p>
 
 <hr>
 
@@ -63,28 +62,9 @@ button.apply { font-weight: bold; }
 
 <script>
 let fonts = [];
-let timeLeft = 300;
-let timerInterval = null;
 let renamingIndex = -1;
 
-document.addEventListener('DOMContentLoaded', () => { loadFonts(); startTimer(); });
-
-function startTimer() {
-  timeLeft = 300;
-  if (timerInterval) clearInterval(timerInterval);
-  timerInterval = setInterval(() => {
-    timeLeft--;
-    let m = Math.floor(timeLeft / 60), s = timeLeft % 60;
-    document.getElementById('timer').textContent = m + ':' + String(s).padStart(2, '0') + ' remaining';
-    if (timeLeft <= 0) {
-      clearInterval(timerInterval);
-      fetch('/api/timeout').catch(() => {});
-      document.body.innerHTML = '<h1>Session expired</h1><p>The device has returned to normal mode.</p>';
-    }
-  }, 1000);
-}
-
-function resetTimer() { startTimer(); }
+document.addEventListener('DOMContentLoaded', () => { loadFonts(); });
 
 async function loadFonts() {
   try {
@@ -156,7 +136,7 @@ function doUndo(i) { resetTimer(); fonts[i].status = 'existing'; delete fonts[i]
 function doRemoveNew(i) { resetTimer(); fonts.splice(i, 1); render(); }
 
 function doRename(i) {
-  resetTimer();
+
   renamingIndex = i;
   render();
   setTimeout(() => {
@@ -191,7 +171,7 @@ function renameKey(e, i) {
 }
 
 document.getElementById('fileInput').addEventListener('change', function() {
-  resetTimer();
+
   for (let file of this.files) {
     if (!file.name.match(/\.(ttf|otf)$/i)) { alert('Only .ttf and .otf files'); continue; }
     if (fonts.some(f => f.name === file.name && f.status !== 'delete')) { alert(file.name + ' already exists'); continue; }
@@ -202,7 +182,7 @@ document.getElementById('fileInput').addEventListener('change', function() {
 });
 
 function cancelChanges() {
-  resetTimer();
+
   fonts = fonts.filter(f => f.status !== 'new');
   fonts.forEach(f => { f.status = 'existing'; delete f.newName; });
   render();

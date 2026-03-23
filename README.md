@@ -20,7 +20,7 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 ## Features
 
 - **Dual rendering modes**: bitmap (anti-aliased grayscale) and Bézier outline (control points, curves, tangent lines)
-- **Automatic cycling**: configurable timer (1–15 minutes) with RTC-based wake from deep power-off
+- **Automatic cycling**: configurable timer (5–15 minutes) with RTC-based wake from deep power-off
 - **Touch interaction**: tap to change glyphs, switch fonts, toggle rendering mode
 - **Setup UI**: on-device configuration with touch-based menu
 - **Font management**: supports up to 100 TrueType fonts, enable/disable individually
@@ -98,7 +98,7 @@ During the 5-second splash screen, tap the screen **4 or more times** to activat
 - Battery drain log written to `/battery_log.txt` on SD
 - Additional timer options: 1 min, 2 min, 5 min (useful for testing)
 
-In normal mode, serial output is completely disabled to save power.
+In normal mode, serial output and battery log are disabled to save power.
 
 ## Configuration
 
@@ -116,7 +116,7 @@ How often the device wakes to display a new glyph:
 ### Fonts
 Enable or disable individual fonts. Only enabled fonts are used for automatic cycling and manual browsing.
 
-- With ≤20 fonts: shown inline in the setup screen with pagination
+- With ≤20 fonts: shown inline in the setup screen with pagination, Select All / Deselect All
 - With >20 fonts: opens a dedicated sub-screen (tap `> Fonts`) with pagination, Select All / Deselect All
 
 ### Unicode Ranges
@@ -172,7 +172,7 @@ When viewing glyphs, the screen is divided into touch zones:
 ├──────┬──────┬────────┤
 │      │      │        │
 │ LEFT │CENTER│ RIGHT  │
-│ 180× │ 180× │ 180×  │
+│ 180× │ 180× │ 180×   │
 │ 780  │ 780  │ 780    │
 │      │      │        │
 │ Prev │Random│ Next   │
@@ -199,7 +199,7 @@ After **40 seconds** of inactivity, the device enters sleep and begins the autom
 ## Rendering Modes
 
 ### Bitmap Mode
-Renders the glyph as a filled shape using FreeType's rasterizer with full 16-level grayscale anti-aliasing. The glyph is displayed at the maximum size that fits the screen (up to 420px).
+Renders the glyph as a filled shape using FreeType's rasterizer with full 16-level grayscale anti-aliasing. The glyph is displayed at the maximum size that fits nicely the screen (420px on the longest side).
 
 ### Outline Mode
 Renders the glyph's Bézier curves showing the underlying vector structure:
@@ -291,12 +291,6 @@ Settings are stored in `/paperspecimen.cfg` on the SD card as plain text:
 - Touch polling at 50 Hz (20ms interval)
 - `pushGrayscaleImage` for efficient bitmap transfers (vs pixel-by-pixel)
 - Blank glyph detection via `FT_LOAD_NO_SCALE` (avoids unnecessary rendering)
-
-## Debug Files
-
-When debug mode is active, the following files may be created on the SD card:
-
-- **`/battery_log.txt`**: one line per glyph generation with timestamp, Unicode codepoint, font name, rendering mode, and battery percentage. Empty lines separate manual wake intervals.
 
 ## Refresh Management
 

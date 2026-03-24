@@ -46,8 +46,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v4.1.0
-static const char* VERSION = "v5.0.1";
+// PaperSpecimen S3 - v5.0.2
+static const char* VERSION = "v5.0.2";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -292,7 +292,7 @@ static int displayW, displayH;
 enum ViewMode { VIEW_BITMAP, VIEW_OUTLINE };
 static ViewMode currentViewMode = VIEW_BITMAP;
 
-// Debug mode (activated by 2+ taps during splash)
+// Debug mode (activated by 4+ taps during splash)
 static bool debugMode = false;
 static float batteryPct = 100.0;  // updated at every boot
 
@@ -1301,16 +1301,6 @@ void applyRotation() {
     M5.Display.setRotation(config.flipInterface ? 2 : 0);
 }
 
-// Get touch coordinates adjusted for flip
-// GT911 always reports physical coords; when display is rotated 180°,
-// we must invert them to match the rotated display
-void adjustTouch(int &x, int &y) {
-    if (config.flipInterface) {
-        x = displayW - 1 - x;
-        y = displayH - 1 - y;
-    }
-}
-
 // Common setup for all UI screens — clears and sets font, but no title/version
 void uiBeginScreen() {
     M5.Display.fillScreen(TFT_WHITE);
@@ -2112,7 +2102,7 @@ void runSetupScreen() {
 // NVS-based wake detection using expected wake timestamp
 // Before sleep: save RTC time + timer duration as "expected wake time"
 // On boot: compare current RTC time with expected wake time
-//   - Close match (within 30s) = timer wake
+//   - Close match (within 4s) = timer wake
 //   - Far off (button pressed early) = manual wake
 
 // Convert RTC date+time to a flat minute count for easy comparison
@@ -2629,7 +2619,7 @@ void wifiSendCors() {
 
 void wifiHandleRoot() {
     wifiServer.sendHeader("Content-Encoding", "gzip");
-    wifiServer.send_P(200, "text/html", (const char*)INDEX_HTML_GZ, INDEX_HTML_GZ_LEN);
+    wifiServer.send_P(200, "text/html", (const char*)web_html_gz, web_html_gz_len);
 }
 
 void wifiHandleFonts() {
@@ -2711,6 +2701,13 @@ void wifiHandleUpload() {
     if (upload.status == UPLOAD_FILE_START) {
         String filename = upload.filename;
         if (filename.startsWith("/")) filename = filename.substring(1);
+        // Reject non-font files
+        String lower = filename;
+        lower.toLowerCase();
+        if (!lower.endsWith(".ttf") && !lower.endsWith(".otf")) {
+            Serial.printf("WiFi: Rejected non-font file: %s\n", filename.c_str());
+            return;
+        }
         String path = "/fonts/" + filename;
         Serial.printf("WiFi: Upload start %s\n", path.c_str());
         // Check flash space if managing flash directly
@@ -3175,7 +3172,7 @@ void setup() {
         M5.Display.setTextSize(2);
         M5.Display.setTextDatum(top_center);
         M5.Display.drawString("NO FONTS FOUND", displayW / 2, displayH / 2);
-        M5.Display.drawString("Add .ttf to /fonts", displayW / 2, displayH / 2 + 40);
+        M5.Display.drawString("Add .ttf or .otf to /fonts", displayW / 2, displayH / 2 + 40);
         M5.Display.display();
         return;
     }

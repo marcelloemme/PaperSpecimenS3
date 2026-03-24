@@ -56,7 +56,7 @@ If no SD card is inserted, the device uses 3 built-in fonts that are automatical
 
 ### Option A: Flash Pre-built Binary
 
-A pre-built binary is available in the repository root: `PaperSpecimenS3_v5.0.2.bin`
+A pre-built binary is available on the [Releases page](https://github.com/marcelloemme/PaperSpecimenS3/releases/latest). Download the `.bin` file from the latest release.
 
 ```bash
 # Install esptool if not already available
@@ -64,7 +64,7 @@ pip install esptool
 
 # Flash the binary (replace /dev/ttyUSB0 with your serial port)
 esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 \
-  write_flash 0x10000 PaperSpecimenS3_v5.0.2.bin
+  write_flash 0x10000 PaperSpecimenS3_vX.X.X.bin
 ```
 
 On macOS the port is typically `/dev/cu.usbmodem*`. On Windows it is `COM3` or similar.

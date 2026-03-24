@@ -331,6 +331,10 @@ The e-ink display uses a mix of full and partial refreshes to balance image qual
 - Built with [M5Unified](https://github.com/m5stack/M5Unified) and [M5GFX](https://github.com/m5stack/M5GFX)
 - Font rendering by [FreeType](https://freetype.org/) (with CFF/PostScript support via custom module integration)
 - Original [PaperSpecimen](https://github.com/marcelloemme/PaperSpecimen) for M5Paper (1st generation)
+- Built-in fonts from [Collletttivo](https://www.collletttivo.it/) (OFL licensed):
+  - **Apfel Grotezk** by Luigi Gorlero
+  - **Ortica Linear** by Elisa Benedetti
+  - **Ronzino** by Chialab
 
 ## License
 

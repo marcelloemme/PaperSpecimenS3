@@ -29,6 +29,8 @@ button.apply { font-weight: bold; }
 .pending.visible { display: block; }
 .pending button { color: #fff; border-color: #fff; }
 .pending button:hover { background: #fff; color: #222; }
+.pending button:disabled { opacity: 0.3; cursor: not-allowed; }
+.pending button:disabled:hover { background: none; color: #fff; }
 #overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); color: #fff; font-size: 1.2em; align-items: center; justify-content: center; text-align: center; }
 #overlay.active { display: flex; }
 </style>
@@ -47,6 +49,7 @@ button.apply { font-weight: bold; }
 <hr>
 
 <h2>Fonts on device <span class="badge" id="fontCount"></span></h2>
+<p class="badge" id="spaceInfo"></p>
 <table>
 <thead><tr><th>Filename</th><th>Size</th><th class="actions">Actions</th></tr></thead>
 <tbody id="fontList"></tbody>
@@ -63,6 +66,9 @@ button.apply { font-weight: bold; }
 <script>
 let fonts = [];
 let renamingIndex = -1;
+let flashMode = false;
+let flashTotal = 0;
+let flashFree = 0;
 
 document.addEventListener('DOMContentLoaded', () => { loadFonts(); });
 
@@ -71,6 +77,12 @@ async function loadFonts() {
     let res = await fetch('/api/fonts');
     let data = await res.json();
     fonts = data.map(f => ({ name: f.name, size: f.size, status: 'existing' }));
+    // Get storage info
+    let infoRes = await fetch('/api/info');
+    let info = await infoRes.json();
+    flashMode = info.flash || false;
+    flashTotal = info.flash_total || 0;
+    flashFree = info.flash_free || 0;
   } catch(e) {
     fonts = [
       { name: 'URW-Handel-Gothic-Regular.ttf', size: 22620, status: 'existing' },
@@ -121,19 +133,42 @@ function render() {
   });
   document.getElementById('fontList').innerHTML = html;
 
+  // Check flash space if in flash mode
+  let overLimit = false;
+  let spaceInfo = document.getElementById('spaceInfo');
+  if (flashMode) {
+    // Calculate how much space new uploads would need
+    let deletedSize = fonts.filter(f => f.status === 'delete').reduce((s, f) => s + f.size, 0);
+    let newSize = fonts.filter(f => f.status === 'new').reduce((s, f) => s + f.size, 0);
+    let netChange = newSize - deletedSize;
+    // flashFree is the actual free space reported by LittleFS (already accounts for metadata)
+    let freeAfter = flashFree - netChange;
+    overLimit = freeAfter < 0;
+    if (spaceInfo) {
+      spaceInfo.textContent = 'Flash: ' + fmtSize(flashFree - netChange) + ' free of ' + fmtSize(flashTotal);
+      spaceInfo.style.color = overLimit ? '#c00' : '#666';
+    }
+  } else {
+    if (spaceInfo) spaceInfo.textContent = '';
+  }
+
   let pending = fonts.filter(f => f.status !== 'existing').length;
   let bar = document.getElementById('changesBar');
+  let applyBtn = document.querySelector('.apply');
   if (pending > 0) {
     bar.classList.add('visible');
-    document.getElementById('changesCount').textContent = pending + (pending === 1 ? ' change' : ' changes');
+    let msg = pending + (pending === 1 ? ' change' : ' changes');
+    if (overLimit) msg += ' — NOT ENOUGH SPACE';
+    document.getElementById('changesCount').textContent = msg;
+    if (applyBtn) applyBtn.disabled = overLimit;
   } else {
     bar.classList.remove('visible');
   }
 }
 
-function doDelete(i) { resetTimer(); fonts[i].status = 'delete'; render(); }
-function doUndo(i) { resetTimer(); fonts[i].status = 'existing'; delete fonts[i].newName; render(); }
-function doRemoveNew(i) { resetTimer(); fonts.splice(i, 1); render(); }
+function doDelete(i) { fonts[i].status = 'delete'; render(); }
+function doUndo(i) { fonts[i].status = 'existing'; delete fonts[i].newName; render(); }
+function doRemoveNew(i) { fonts.splice(i, 1); render(); }
 
 function doRename(i) {
 

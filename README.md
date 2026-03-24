@@ -1,6 +1,6 @@
 # PaperSpecimen S3
 
-A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType (.ttf) and OpenType (.otf) fonts and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. Fonts are automatically cached to internal flash storage (~12 MB) for SD-free operation — the SD card is only needed for initial font loading and WiFi font management. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
+A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType (.ttf) and OpenType (.otf/CFF) fonts and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. The device works out of the box with 3 built-in fonts — no SD card required. Fonts are automatically cached to internal flash storage (~12 MB) for SD-free operation. Additional fonts can be loaded via SD card or uploaded wirelessly through the built-in WiFi font manager. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
 
 
 ## Hardware
@@ -22,7 +22,8 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 - **Automatic cycling**: configurable timer (5–15 minutes) with RTC-based wake from deep power-off
 - **Touch interaction**: tap to change glyphs, switch fonts, toggle rendering mode
 - **Setup UI**: on-device configuration with touch-based menu
-- **Font management**: supports up to 100 TrueType fonts, enable/disable individually
+- **3 built-in fonts**: works immediately without an SD card (Apfel Grotezk Bold, Ortica Linear Light, Ronzino Regular — all OFL licensed)
+- **Font management**: supports up to 100 TrueType/OpenType fonts, enable/disable individually
 - **Unicode range selection**: 28 configurable ranges (Basic Latin through Latin Extended Additional)
 - **WiFi font manager**: upload, rename, and delete fonts wirelessly from any browser — no SD card removal needed
 - **Flip interface**: rotate display 180° for lanyard/inverted mounting
@@ -35,8 +36,8 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 ### Prerequisites
 
 - [PlatformIO](https://platformio.org/) (VSCode extension or CLI)
-- M5Paper S3 with MicroSD card (for initial font loading)
-- TrueType font files (.ttf or .otf)
+- M5Paper S3 (MicroSD card optional — device includes 3 built-in fonts)
+- Additional TrueType/OpenType font files (.ttf or .otf) if desired
 
 ### SD Card Structure
 
@@ -49,11 +50,13 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 └── paperspecimen.cfg    (created automatically after first setup)
 ```
 
-Place your `.ttf` font files in a `/fonts` directory on the SD card root. On first setup, the device copies all fonts to internal flash storage (~12 MB available). If the total font size fits within this limit, the SD card is no longer needed and can be removed — the device operates entirely from flash, saving power. If fonts exceed 12 MB, the device falls back to reading from SD.
+Place your `.ttf` or `.otf` font files in a `/fonts` directory on the SD card root. On first setup, the device copies all fonts to internal flash storage (~12 MB available). If the total font size fits within this limit, the SD card is no longer needed and can be removed — the device operates entirely from flash, saving power. If fonts exceed 12 MB, the device falls back to reading from SD.
+
+If no SD card is inserted, the device uses 3 built-in fonts that are automatically extracted to flash on first boot. You can later add more fonts wirelessly via the WiFi font manager.
 
 ### Option A: Flash Pre-built Binary
 
-A pre-built binary is available in the repository root: `PaperSpecimenS3_v4.1.2.bin`
+A pre-built binary is available in the repository root: `PaperSpecimenS3_v5.0.1.bin`
 
 ```bash
 # Install esptool if not already available
@@ -61,7 +64,7 @@ pip install esptool
 
 # Flash the binary (replace /dev/ttyUSB0 with your serial port)
 esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 \
-  write_flash 0x10000 PaperSpecimenS3_v4.1.2.bin
+  write_flash 0x10000 PaperSpecimenS3_v5.0.1.bin
 ```
 
 On macOS the port is typically `/dev/cu.usbmodem*`. On Windows it is `COM3` or similar.
@@ -170,7 +173,9 @@ From any phone or computer connected to the WiFi, open a browser to access the f
 - **Rename** existing fonts
 - **Delete** fonts you no longer need
 
-All changes are staged as a preview — nothing is written to the SD card until you tap "Apply changes". After applying, the device restarts automatically with the updated font library.
+All changes are staged as a preview — nothing is written until you tap "Apply changes". After applying, the device restarts automatically with the updated font library.
+
+When no SD card is present, the WiFi font manager operates directly on the internal flash storage, with a real-time display of available space. Uploads that would exceed the flash capacity are blocked.
 
 The WiFi session has a 5-minute timeout. If no action is taken, the device exits WiFi mode and restarts. The CPU is temporarily boosted to 160 MHz while WiFi is active, then returns to 80 MHz on exit.
 
@@ -303,8 +308,10 @@ Settings are stored in `/.paperspecimen.cfg` (hidden file) on internal flash or 
 - Serial disabled in normal mode (no USB CDC overhead)
 - Touch controller disabled during timer wake
 - E-ink display controller put to sleep 3 seconds after last full refresh
+- 3 built-in fonts (no SD card required for basic operation)
 - Fonts cached to internal flash (~12 MB) — SD card not needed after initial setup
 - SD card bus fully powered off when fonts are in flash
+- FreeType stream-based font loading (reads directly from flash/SD, no full-file RAM allocation)
 - Touch polling at 50 Hz (20ms interval)
 - `pushGrayscaleImage` for efficient bitmap transfers (vs pixel-by-pixel)
 - Blank glyph detection via `FT_LOAD_NO_SCALE` (avoids unnecessary rendering)
@@ -322,7 +329,7 @@ The e-ink display uses a mix of full and partial refreshes to balance image qual
 ## Acknowledgments
 
 - Built with [M5Unified](https://github.com/m5stack/M5Unified) and [M5GFX](https://github.com/m5stack/M5GFX)
-- Font rendering by [FreeType](https://freetype.org/)
+- Font rendering by [FreeType](https://freetype.org/) (with CFF/PostScript support via custom module integration)
 - Original [PaperSpecimen](https://github.com/marcelloemme/PaperSpecimen) for M5Paper (1st generation)
 
 ## License

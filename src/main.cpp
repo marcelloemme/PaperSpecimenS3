@@ -17,9 +17,32 @@
 #include FT_GLYPH_H
 #include FT_OUTLINE_H
 #include FT_BBOX_H
+#include FT_MODULE_H
+
+// CFF/OTF support: manually register modules since ftmodule.h patching
+// is unreliable with PlatformIO's build caching
+extern "C" {
+    extern const FT_Module_Class  psnames_module_class;
+    extern const FT_Module_Class  psaux_module_class;
+    extern const FT_Module_Class  pshinter_module_class;
+    extern void* get_cff_driver_class(void);
+}
+
+static void registerCFFModules(FT_Library lib) {
+    FT_Error e;
+    e = FT_Add_Module(lib, &psnames_module_class);
+    Serial.printf("  Add psnames: 0x%02X\n", e);
+    e = FT_Add_Module(lib, &psaux_module_class);
+    Serial.printf("  Add psaux: 0x%02X\n", e);
+    e = FT_Add_Module(lib, &pshinter_module_class);
+    Serial.printf("  Add pshinter: 0x%02X\n", e);
+    e = FT_Add_Module(lib, (const FT_Module_Class*)get_cff_driver_class());
+    Serial.printf("  Add cff: 0x%02X\n", e);
+    Serial.println("CFF/OTF modules registered");
+}
 
 // PaperSpecimen S3 - v4.1.0
-static const char* VERSION = "v4.1.1";
+static const char* VERSION = "v4.1.2";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -2973,6 +2996,8 @@ void setup() {
         return;
     }
     Serial.println("FreeType initialized");
+    // Manually register CFF modules for OTF support
+    registerCFFModules(ftLibrary);
 
     // Use ESP32-S3 hardware RNG for true randomness
     // (analogRead(0) doesn't work on S3 — GPIO0 is not an ADC pin)

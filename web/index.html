@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PaperSpecimen S3 — Font Manager</title>
+<title>PaperSpecimen S3 — WiFi Manager</title>
 <style>
 body { max-width: 650px; margin: 40px auto; padding: 0 20px; font-family: sans-serif; line-height: 1.6; color: #222; }
 h1, h2 { line-height: 1.2; }
@@ -38,12 +38,12 @@ button.apply { font-weight: bold; }
 <body>
 
 <h1>PaperSpecimen S3</h1>
-<p>Font Manager</p>
+<p>WiFi Manager</p>
 
 <hr>
 
 <h2>Upload fonts</h2>
-<p>Select .ttf files to add to the device.</p>
+<p>Select .ttf or .otf font files to add to the device.</p>
 <input type="file" id="fileInput" accept=".ttf,.otf" multiple>
 
 <hr>
@@ -54,6 +54,22 @@ button.apply { font-weight: bold; }
 <thead><tr><th>Filename</th><th>Size</th><th class="actions">Actions</th></tr></thead>
 <tbody id="fontList"></tbody>
 </table>
+
+<hr>
+
+<h2>Firmware Update</h2>
+<button id="scanBtn" onclick="scanWifi()">Scan for networks</button>
+<div id="wifiList" style="margin:12px 0"></div>
+<div style="margin:12px 0">
+  <input type="text" id="otaSsid" placeholder="WiFi network" readonly style="background:#f5f5f5">
+  <div id="otaPassRow" style="margin-top:8px;display:none">
+    <input type="password" id="otaPass" placeholder="Password" onkeydown="if(event.key==='Enter')checkForUpdate()">
+    <button onclick="checkForUpdate()">Connect</button>
+  </div>
+</div>
+<div id="otaStatus"></div>
+
+<hr>
 
 <div class="pending" id="changesBar">
   <span id="changesCount"></span> &nbsp;
@@ -108,7 +124,7 @@ function render() {
 
   let html = '';
   if (fonts.length === 0) {
-    html = '<tr><td colspan="3">No fonts found. Upload some .ttf files.</td></tr>';
+    html = '<tr><td colspan="3">No fonts found. Upload some .ttf or .otf files.</td></tr>';
   }
   fonts.forEach((f, i) => {
     if (renamingIndex === i) {
@@ -261,6 +277,93 @@ async function applyChanges() {
   } catch(e) {
     ov.classList.remove('active');
     alert('Error: ' + e.message);
+  }
+}
+// --- OTA Firmware Update ---
+async function scanWifi() {
+  let btn = document.getElementById('scanBtn');
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+  try {
+    let res = await fetch('/api/wifi-scan');
+    let networks = await res.json();
+    let list = document.getElementById('wifiList');
+    if (networks.length === 0) {
+      list.innerHTML = '<p>No networks found. Try again.</p>';
+    } else {
+      let html = '';
+      networks.forEach(n => {
+        let lock = n.open ? '' : ' &#128274;';
+        html += '<div style="padding:6px 0;border-bottom:1px solid #ddd;cursor:pointer" onclick="selectWifi(\'' + n.ssid.replace(/'/g,"\\'") + '\',' + !n.open + ')">';
+        html += '<strong>' + n.ssid + '</strong>' + lock + ' <span class="badge">' + n.rssi + ' dBm</span></div>';
+      });
+      list.innerHTML = html;
+    }
+  } catch(e) {
+    document.getElementById('wifiList').innerHTML = '<p>Scan failed: ' + e.message + '</p>';
+  }
+  btn.textContent = 'Scan for networks';
+  btn.disabled = false;
+}
+
+function selectWifi(ssid, needsPass) {
+  document.getElementById('otaSsid').value = ssid;
+  let passRow = document.getElementById('otaPassRow');
+  if (needsPass) {
+    passRow.style.display = '';
+    document.getElementById('otaPass').focus();
+  } else {
+    passRow.style.display = 'none';
+    checkForUpdate();
+  }
+}
+
+async function checkForUpdate() {
+  let ssid = document.getElementById('otaSsid').value.trim();
+  let pass = document.getElementById('otaPass').value;
+  if (!ssid) { alert('Select a WiFi network first'); return; }
+
+  let status = document.getElementById('otaStatus');
+  status.innerHTML = '<p>Connecting to <strong>' + ssid + '</strong>...</p>';
+
+  try {
+    let res = await fetch('/api/ota-check', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ssid: ssid, pass: pass})
+    });
+    let data = await res.json();
+    if (data.error) {
+      status.innerHTML = '<p style="color:#c00">' + data.error + '</p>';
+      return;
+    }
+    let html = '<p>Current version: <strong>' + data.current + '</strong></p>';
+    html += '<p>Latest version: <strong>' + data.latest + '</strong></p>';
+    if (data.update_available) {
+      html += '<p style="color:green">New version available!</p>';
+      html += '<button onclick="doOtaUpdate()" style="font-weight:bold;padding:8px 20px">Download and install ' + data.latest + '</button>';
+    } else {
+      html += '<p>You are up to date.</p>';
+    }
+    status.innerHTML = html;
+  } catch(e) {
+    status.innerHTML = '<p style="color:#c00">Error: ' + e.message + '</p>';
+  }
+}
+
+async function doOtaUpdate() {
+  let status = document.getElementById('otaStatus');
+  status.innerHTML = '<p><strong>Downloading and installing update...</strong></p><p>Do not disconnect. The device will restart when complete.</p>';
+  try {
+    let res = await fetch('/api/ota-update');
+    let data = await res.json();
+    if (data.error) {
+      status.innerHTML = '<p style="color:#c00">Update failed: ' + data.error + '</p>';
+    } else {
+      status.innerHTML = '<p style="color:green"><strong>Update complete!</strong> Device is restarting. You can close this page.</p>';
+    }
+  } catch(e) {
+    status.innerHTML = '<p style="color:green"><strong>Update complete!</strong> Device is restarting. You can close this page.</p>';
   }
 }
 </script>

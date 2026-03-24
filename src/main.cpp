@@ -9,6 +9,8 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <HTTPClient.h>
+#include <Update.h>
 #include "web_content.h"
 
 // Embedded default fonts (extracted to flash on first boot without SD)
@@ -46,8 +48,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.0.2
-static const char* VERSION = "v5.0.2";
+// PaperSpecimen S3 - v5.1.0
+static const char* VERSION = "v5.1.0";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -1670,7 +1672,7 @@ void renderSetupScreen(int fontPage) {
     y += UI_LINE_H;
 
     M5.Display.drawString(">", leftX + indent - arrowW, y);
-    M5.Display.drawString("Manage fonts (WiFi)", leftX + indent, y);
+    M5.Display.drawString("WiFi manager", leftX + indent, y);
     addUiItem(y, UI_LINE_H, ID_WIFI_MANAGER);
     y += UI_LINE_H;
 
@@ -2148,13 +2150,14 @@ int checkWakeReason() {
     if (diff < -43200) diff += 86400;
 
     // RTC alarm fires at exact HH:MM:00, boot takes ~2-3s, so timer wake
-    // diff is always +2-5s. Any wake more than 5s off is a manual button press.
+    // diff is always positive (+2-4s). A negative diff (woke before expected)
+    // is always a manual button press — the RTC can't fire early.
     #define WAKE_TOLERANCE_S 4
     int result;
-    if (abs(diff) <= WAKE_TOLERANCE_S) {
+    if (diff >= 0 && diff <= WAKE_TOLERANCE_S) {
         result = 1; // timer wake
     } else {
-        result = 2; // manual wake (button pressed)
+        result = 2; // manual wake (button pressed or woke before expected time)
     }
 
     Serial.printf("Wake check: now=%02d:%02d:%02d, expected=%02d:%02d:%02d, diff=%ds → %s\n",
@@ -2760,6 +2763,258 @@ void wifiHandleInfo() {
     wifiServer.send(200, "application/json", json);
 }
 
+// --- OTA Firmware Update ---
+// GitHub API URL for latest release
+#define OTA_GITHUB_API "https://api.github.com/repos/marcelloemme/PaperSpecimenS3/releases/latest"
+static String otaDownloadUrl = ""; // stored between check and update
+
+void wifiHandleWifiScan() {
+    wifiSendCors();
+    Serial.println("WiFi: Scanning networks...");
+    int n = WiFi.scanNetworks(false, false, false, 300);
+    String json = "[";
+    for (int i = 0; i < n; i++) {
+        if (i > 0) json += ",";
+        String ssid = WiFi.SSID(i);
+        ssid.replace("\"", "\\\""); // escape quotes in SSID
+        json += "{\"ssid\":\"" + ssid + "\",\"rssi\":" + String(WiFi.RSSI(i));
+        json += ",\"open\":" + String(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "true" : "false") + "}";
+    }
+    json += "]";
+    WiFi.scanDelete();
+    Serial.printf("WiFi: Found %d networks\n", n);
+    wifiServer.send(200, "application/json", json);
+}
+
+void wifiHandleOtaCheck() {
+    wifiSendCors();
+    if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "application/json", "{\"error\":\"No body\"}"); return; }
+    String body = wifiServer.arg("plain");
+
+    // Parse SSID and password from JSON
+    int ssidStart = body.indexOf("\"ssid\"") + 8;
+    int ssidEnd = body.indexOf("\"", ssidStart);
+    int passStart = body.indexOf("\"pass\"") + 8;
+    int passEnd = body.indexOf("\"", passStart);
+    if (ssidStart < 8 || ssidEnd < 0) { wifiServer.send(400, "application/json", "{\"error\":\"Bad request\"}"); return; }
+
+    String ssid = body.substring(ssidStart, ssidEnd);
+    String pass = (passStart >= 8 && passEnd > passStart) ? body.substring(passStart, passEnd) : "";
+
+    Serial.printf("OTA: Connecting to '%s'...\n", ssid.c_str());
+
+    // Update e-ink display
+    M5.Display.wakeup();
+    int cx = displayW / 2;
+    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("Connecting to WiFi...", cx, displayH / 2 - 8);
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    // Switch to AP+STA mode (keep AP running, connect to router as client)
+    WiFi.mode(WIFI_AP_STA);
+    WiFi.begin(ssid.c_str(), pass.c_str());
+
+    int attempts = 0;
+    while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+        delay(500);
+        attempts++;
+        Serial.print(".");
+    }
+    Serial.println();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("OTA: WiFi connection failed");
+        WiFi.disconnect();
+        WiFi.mode(WIFI_AP);
+        // Restore e-ink
+        M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+        M5.Display.drawString("Connection failed", cx, displayH / 2 - 8);
+        M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+        M5.Display.display();
+        wifiServer.send(200, "application/json", "{\"error\":\"Could not connect to WiFi. Check password.\"}");
+        return;
+    }
+    Serial.printf("OTA: Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    // Update e-ink
+    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+    M5.Display.drawString("Checking for updates...", cx, displayH / 2 - 8);
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    // Query GitHub API for latest release
+    HTTPClient http;
+    http.setUserAgent("PaperSpecimenS3");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(10000);
+
+    if (!http.begin(OTA_GITHUB_API)) {
+        Serial.println("OTA: HTTP begin failed");
+        wifiServer.send(200, "application/json", "{\"error\":\"Failed to connect to GitHub\"}");
+        return;
+    }
+
+    int httpCode = http.GET();
+    Serial.printf("OTA: GitHub API response: %d\n", httpCode);
+
+    if (httpCode != 200) {
+        http.end();
+        wifiServer.send(200, "application/json", "{\"error\":\"GitHub API returned " + String(httpCode) + "\"}");
+        return;
+    }
+
+    String payload = http.getString();
+    http.end();
+
+    // Parse tag_name from JSON (simple string search)
+    int tagStart = payload.indexOf("\"tag_name\"") + 13;
+    int tagEnd = payload.indexOf("\"", tagStart);
+    String latestTag = payload.substring(tagStart, tagEnd);
+    Serial.printf("OTA: Latest release: %s, current: %s\n", latestTag.c_str(), VERSION);
+
+    // Find .bin asset download URL
+    // Look for browser_download_url ending in .bin
+    otaDownloadUrl = "";
+    int binUrlStart = payload.indexOf("browser_download_url");
+    while (binUrlStart > 0) {
+        binUrlStart = payload.indexOf("\"", binUrlStart + 22) + 1;
+        int binUrlEnd = payload.indexOf("\"", binUrlStart);
+        String url = payload.substring(binUrlStart, binUrlEnd);
+        if (url.endsWith(".bin")) {
+            otaDownloadUrl = url;
+            break;
+        }
+        binUrlStart = payload.indexOf("browser_download_url", binUrlEnd);
+    }
+
+    bool updateAvailable = (latestTag != VERSION && otaDownloadUrl.length() > 0);
+
+    String response = "{\"current\":\"" + String(VERSION) + "\",\"latest\":\"" + latestTag + "\"";
+    response += ",\"update_available\":" + String(updateAvailable ? "true" : "false") + "}";
+
+    // Update e-ink
+    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+    if (updateAvailable) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "Update available: %s", latestTag.c_str());
+        M5.Display.drawString(msg, cx, displayH / 2 - 8);
+    } else {
+        M5.Display.drawString("Up to date", cx, displayH / 2 - 8);
+    }
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.display();
+
+    wifiServer.send(200, "application/json", response);
+}
+
+void wifiHandleOtaUpdate() {
+    wifiSendCors();
+
+    if (otaDownloadUrl.length() == 0) {
+        wifiServer.send(200, "application/json", "{\"error\":\"No update URL. Run check first.\"}");
+        return;
+    }
+
+    Serial.printf("OTA: Downloading %s\n", otaDownloadUrl.c_str());
+
+    // Update e-ink
+    int cx = displayW / 2;
+    M5.Display.wakeup();
+    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+    M5.Display.drawString("Downloading update...", cx, displayH / 2 - 8);
+    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+
+    HTTPClient http;
+    http.setUserAgent("PaperSpecimenS3");
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(30000);
+
+    if (!http.begin(otaDownloadUrl)) {
+        wifiServer.send(200, "application/json", "{\"error\":\"Failed to connect to download server\"}");
+        return;
+    }
+
+    int httpCode = http.GET();
+    if (httpCode != 200) {
+        http.end();
+        wifiServer.send(200, "application/json", "{\"error\":\"Download failed: HTTP " + String(httpCode) + "\"}");
+        return;
+    }
+
+    int contentLength = http.getSize();
+    Serial.printf("OTA: Firmware size: %d bytes\n", contentLength);
+
+    if (contentLength <= 0) {
+        http.end();
+        wifiServer.send(200, "application/json", "{\"error\":\"Invalid firmware size\"}");
+        return;
+    }
+
+    if (!Update.begin(contentLength)) {
+        http.end();
+        wifiServer.send(200, "application/json", "{\"error\":\"Not enough space for update\"}");
+        return;
+    }
+
+    WiFiClient* stream = http.getStreamPtr();
+    uint8_t buf[4096];
+    int written = 0;
+    int lastPct = -1;
+
+    while (written < contentLength) {
+        int available = stream->available();
+        if (available <= 0) {
+            delay(10);
+            continue;
+        }
+        int toRead = min(available, (int)sizeof(buf));
+        if (toRead > contentLength - written) toRead = contentLength - written;
+        int bytesRead = stream->read(buf, toRead);
+        if (bytesRead <= 0) break;
+
+        Update.write(buf, bytesRead);
+        written += bytesRead;
+
+        int pct = (written * 100) / contentLength;
+        if (pct != lastPct && pct % 10 == 0) {
+            lastPct = pct;
+            Serial.printf("OTA: %d%%\n", pct);
+            // Update e-ink progress
+            char prog[32];
+            snprintf(prog, sizeof(prog), "Updating... %d%%", pct);
+            M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+            M5.Display.setTextDatum(top_center);
+            M5.Display.drawString(prog, cx, displayH / 2 - 8);
+            M5.Display.setEpdMode(epd_mode_t::epd_fastest);
+            M5.Display.display();
+        }
+    }
+    http.end();
+
+    if (Update.end(true)) {
+        Serial.println("OTA: Update successful!");
+        // Show success on e-ink
+        M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
+        M5.Display.drawString("Update complete! Restarting...", cx, displayH / 2 - 8);
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.display();
+        M5.Display.waitDisplay();
+
+        wifiServer.send(200, "application/json", "{\"success\":true}");
+        delay(1000);
+        ESP.restart();
+    } else {
+        Serial.printf("OTA: Update failed: %s\n", Update.errorString());
+        wifiServer.send(200, "application/json", "{\"error\":\"" + String(Update.errorString()) + "\"}");
+    }
+}
+
 // Captive portal: redirect all unknown requests to root
 void wifiHandleNotFound() {
     wifiServer.sendHeader("Location", "http://192.168.4.1/", true);
@@ -2814,6 +3069,9 @@ void runWiFiFontManager() {
     wifiServer.on("/api/apply", HTTP_GET, wifiHandleApply);
     wifiServer.on("/api/info", HTTP_GET, wifiHandleInfo);
     wifiServer.on("/api/timeout", HTTP_GET, wifiHandleTimeout);
+    wifiServer.on("/api/wifi-scan", HTTP_GET, wifiHandleWifiScan);
+    wifiServer.on("/api/ota-check", HTTP_POST, wifiHandleOtaCheck);
+    wifiServer.on("/api/ota-update", HTTP_GET, wifiHandleOtaUpdate);
     wifiServer.onNotFound(wifiHandleNotFound);
     wifiServer.begin();
     Serial.println("Web server started on port 80");

@@ -10,6 +10,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <Update.h>
 #include "web_content.h"
 
@@ -48,8 +49,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.1.1
-static const char* VERSION = "v5.1.1";
+// PaperSpecimen S3 - v5.1.2
+static const char* VERSION = "v5.1.2";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -2877,13 +2878,15 @@ void wifiHandleOtaCheck() {
     M5.Display.display();
     M5.Display.waitDisplay();
 
-    // Query GitHub API for latest release
+    // Query GitHub API for latest release (HTTPS, skip cert verification)
+    WiFiClientSecure sslClient;
+    sslClient.setInsecure(); // skip certificate verification
     HTTPClient http;
     http.setUserAgent("PaperSpecimenS3");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(10000);
 
-    if (!http.begin(OTA_GITHUB_API)) {
+    if (!http.begin(sslClient, OTA_GITHUB_API)) {
         Serial.println("OTA: HTTP begin failed");
         wifiServer.send(200, "application/json", "{\"error\":\"Failed to connect to GitHub\"}");
         return;
@@ -2961,17 +2964,21 @@ void wifiHandleOtaUpdate() {
     M5.Display.display();
     M5.Display.waitDisplay();
 
+    WiFiClientSecure sslClient;
+    sslClient.setInsecure(); // skip certificate verification for GitHub download
     HTTPClient http;
     http.setUserAgent("PaperSpecimenS3");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(30000);
 
-    if (!http.begin(otaDownloadUrl)) {
+    if (!http.begin(sslClient, otaDownloadUrl)) {
+        Serial.println("OTA: HTTP begin failed for download");
         wifiServer.send(200, "application/json", "{\"error\":\"Failed to connect to download server\"}");
         return;
     }
 
     int httpCode = http.GET();
+    Serial.printf("OTA: Download HTTP response: %d\n", httpCode);
     if (httpCode != 200) {
         http.end();
         wifiServer.send(200, "application/json", "{\"error\":\"Download failed: HTTP " + String(httpCode) + "\"}");

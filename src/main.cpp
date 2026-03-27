@@ -48,8 +48,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.1.0
-static const char* VERSION = "v5.1.0";
+// PaperSpecimen S3 - v5.1.1
+static const char* VERSION = "v5.1.1";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -2176,8 +2176,21 @@ int checkWakeReason() {
 void logBatteryDebug(uint32_t codepoint, const char* wakeType) {
     if (!debugMode) return;
 
+    // Check NVS to see if SD was present at last setup
+    // If no SD, skip logging entirely (don't power the SD module)
+    bool sdPresentAtSetup = false;
+    {
+        Preferences p;
+        p.begin("ps3", true);
+        sdPresentAtSetup = p.getBool("sd_present", false);
+        p.end();
+    }
+    if (!sdPresentAtSetup) {
+        Serial.println("No SD at last setup — battery log skipped");
+        return;
+    }
+
     // If fonts are in flash, we need to init SD just for the log
-    // Skip if SD is not physically present (avoid SPI conflicts)
     bool sdWasOff = false;
     if (fontsInFlash) {
         SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
@@ -2186,7 +2199,7 @@ void logBatteryDebug(uint32_t codepoint, const char* wakeType) {
         } else {
             SD.end();
             SPI.end();
-            Serial.println("SD not available for battery log — skipping");
+            Serial.println("SD init failed for battery log — skipping");
             return;
         }
     }
@@ -2221,6 +2234,16 @@ void logBatteryDebug(uint32_t codepoint, const char* wakeType) {
 // Append an empty line to the battery log (separates manual wake sessions)
 void logBatteryBlankLine() {
     if (!debugMode) return;
+
+    // Check NVS to see if SD was present at last setup
+    bool sdPresentAtSetup = false;
+    {
+        Preferences p;
+        p.begin("ps3", true);
+        sdPresentAtSetup = p.getBool("sd_present", false);
+        p.end();
+    }
+    if (!sdPresentAtSetup) return;
 
     bool sdWasOff = false;
     if (fontsInFlash) {
@@ -2430,6 +2453,14 @@ void runSplashAndSetup() {
     } else {
         sdAvailableAtSplash = true;
         Serial.println("SD available at splash");
+    }
+
+    // Save SD presence to NVS so wake paths know whether to try SD
+    {
+        Preferences p;
+        p.begin("ps3", false);
+        p.putBool("sd_present", sdAvailableAtSplash);
+        p.end();
     }
 
     // Splash screen (5 seconds, 2+ taps = debug mode)

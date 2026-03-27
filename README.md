@@ -25,7 +25,7 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
 - **3 built-in fonts**: works immediately without an SD card (Apfel Grotezk Bold, Ortica Linear Light, Ronzino Regular — all OFL licensed)
 - **Font management**: supports up to 100 TrueType/OpenType fonts, enable/disable individually
 - **Unicode range selection**: 28 configurable ranges (Basic Latin through Latin Extended Additional)
-- **WiFi font manager**: upload, rename, and delete fonts wirelessly from any browser — no SD card removal needed
+- **WiFi manager**: upload, rename, and delete fonts wirelessly from any browser — plus OTA firmware updates via WiFi
 - **Flip interface**: rotate display 180° for lanyard/inverted mounting
 - **Debug mode**: serial logging, battery drain tracking, faster timer options
 - **Battery monitoring**: automatic shutdown at 5% with low-battery icon
@@ -98,10 +98,10 @@ pio device monitor
 During the 5-second splash screen, tap the screen **4 or more times** to activate debug mode. Debug mode enables:
 
 - Serial output over USB-C (115200 baud)
-- Battery drain log written to `/battery_log.txt` on SD
+- Battery drain log written to `/battery_log.txt` on SD (only if SD was present at setup)
 - Additional timer options: 1 min, 2 min, 5 min (useful for testing)
 
-In normal mode, serial output and battery log are disabled to save power.
+In normal mode, serial output and battery log are disabled to save power. In debug mode without an SD card, the battery percentage is shown on screen next to the codepoint but no log file is written — this provides a more accurate battery drain measurement for SD-free operation.
 
 ## Configuration
 
@@ -161,8 +161,8 @@ The first 6 ranges (Basic Latin through IPA Extensions) are enabled by default.
 ### Flip Interface
 Tap `> Flip interface` to rotate the entire UI 180°. Useful when wearing the M5Paper S3 on a lanyard (the device hangs upside down). The flip state is saved and persisted across reboots.
 
-### Manage Fonts (WiFi)
-Tap `> Manage fonts (WiFi)` to launch a wireless font manager. The device creates a WiFi access point and serves a web-based interface for managing fonts without removing the SD card:
+### WiFi Manager
+Tap `> WiFi manager` to launch a wireless manager. The device creates a WiFi access point and serves a web-based interface for managing fonts and updating firmware without removing the SD card:
 
 - **SSID**: `PaperSpecimenS3`
 - **Password**: `seriforsans`
@@ -175,9 +175,19 @@ From any phone or computer connected to the WiFi, open a browser to access the f
 
 All changes are staged as a preview — nothing is written until you tap "Apply changes". After applying, the device restarts automatically with the updated font library.
 
-When no SD card is present, the WiFi font manager operates directly on the internal flash storage, with a real-time display of available space. Uploads that would exceed the flash capacity are blocked.
+When no SD card is present, the WiFi manager operates directly on the internal flash storage, with a real-time display of available space. Uploads that would exceed the flash capacity are blocked.
 
 The WiFi session has a 5-minute timeout. If no action is taken, the device exits WiFi mode and restarts. The CPU is temporarily boosted to 160 MHz while WiFi is active, then returns to 80 MHz on exit.
+
+#### OTA Firmware Update
+
+The WiFi manager also includes a firmware update section at the bottom of the page. To check for updates:
+
+1. Tap **Scan for networks** to see available WiFi networks
+2. Select your home network and enter the password
+3. The device connects to your router (while keeping the captive portal active) and checks GitHub Releases for a newer version
+4. If an update is available, tap **Download and install** — progress is shown both on the web page and on the e-ink display
+5. The device restarts automatically after a successful update
 
 ### Confirm
 Tap `> Confirm` to save the configuration and start displaying glyphs. The setup auto-confirms after 60 seconds of inactivity.

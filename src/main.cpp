@@ -1065,8 +1065,8 @@ void drawDashedLine(float x1, float y1, float x2, float y2, uint16_t color) {
 
         if (drawing) {
             drawLineAA(
-                (int)(x1 + dx * distance), (int)(y1 + dy * distance),
-                (int)(x1 + dx * end_dist), (int)(y1 + dy * end_dist));
+                (int)roundf(x1 + dx * distance), (int)roundf(y1 + dy * distance),
+                (int)roundf(x1 + dx * end_dist), (int)roundf(y1 + dy * end_dist));
         }
 
         distance = end_dist;
@@ -2870,6 +2870,31 @@ void wifiHandleInfo() {
 #define OTA_GITHUB_API "https://api.github.com/repos/marcelloemme/PaperSpecimenS3/releases/latest"
 static String otaDownloadUrl = ""; // stored between check and update
 
+// Display OTA status on e-ink with full layout (title, message, version)
+void showOtaStatus(const char* message) {
+    M5.Display.wakeup();
+    M5.Display.fillScreen(TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setFont(&fonts::Font0);
+
+    // Title at top
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString("PaperSpecimen S3", displayW / 2, UI_PAD);
+
+    // Version at bottom
+    M5.Display.setTextDatum(bottom_center);
+    M5.Display.drawString(VERSION, displayW / 2, displayH - UI_PAD);
+
+    // Message centered
+    M5.Display.setTextDatum(top_center);
+    M5.Display.drawString(message, displayW / 2, displayH / 2 - 8);
+
+    M5.Display.setEpdMode(epd_mode_t::epd_quality);
+    M5.Display.display();
+    M5.Display.waitDisplay();
+}
+
 void wifiHandleWifiScan() {
     wifiSendCors();
     Serial.println("WiFi: Scanning networks...");
@@ -2905,15 +2930,7 @@ void wifiHandleOtaCheck() {
 
     Serial.printf("OTA: Connecting to '%s'...\n", ssid.c_str());
 
-    // Update e-ink display
-    M5.Display.wakeup();
-    int cx = displayW / 2;
-    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-    M5.Display.setTextDatum(top_center);
-    M5.Display.drawString("Connecting to WiFi...", cx, displayH / 2 - 8);
-    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-    M5.Display.display();
-    M5.Display.waitDisplay();
+    showOtaStatus("Connecting to WiFi...");
 
     // Switch to AP+STA mode (keep AP running, connect to router as client)
     WiFi.mode(WIFI_AP_STA);
@@ -2931,22 +2948,13 @@ void wifiHandleOtaCheck() {
         Serial.println("OTA: WiFi connection failed");
         WiFi.disconnect();
         WiFi.mode(WIFI_AP);
-        // Restore e-ink
-        M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-        M5.Display.drawString("Connection failed", cx, displayH / 2 - 8);
-        M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-        M5.Display.display();
+        showOtaStatus("Connection failed");
         wifiServer.send(200, "application/json", "{\"error\":\"Could not connect to WiFi. Check password.\"}");
         return;
     }
     Serial.printf("OTA: Connected! IP: %s\n", WiFi.localIP().toString().c_str());
 
-    // Update e-ink
-    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-    M5.Display.drawString("Checking for updates...", cx, displayH / 2 - 8);
-    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-    M5.Display.display();
-    M5.Display.waitDisplay();
+    showOtaStatus("Checking for updates...");
 
     // Query GitHub API for latest release (HTTPS, skip cert verification)
     WiFiClientSecure sslClient;
@@ -3000,17 +3008,13 @@ void wifiHandleOtaCheck() {
     String response = "{\"current\":\"" + String(VERSION) + "\",\"latest\":\"" + latestTag + "\"";
     response += ",\"update_available\":" + String(updateAvailable ? "true" : "false") + "}";
 
-    // Update e-ink
-    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
     if (updateAvailable) {
         char msg[64];
         snprintf(msg, sizeof(msg), "Update available: %s", latestTag.c_str());
-        M5.Display.drawString(msg, cx, displayH / 2 - 8);
+        showOtaStatus(msg);
     } else {
-        M5.Display.drawString("Up to date", cx, displayH / 2 - 8);
+        showOtaStatus("Up to date");
     }
-    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-    M5.Display.display();
 
     wifiServer.send(200, "application/json", response);
 }
@@ -3025,14 +3029,7 @@ void wifiHandleOtaUpdate() {
 
     Serial.printf("OTA: Downloading %s\n", otaDownloadUrl.c_str());
 
-    // Update e-ink
-    int cx = displayW / 2;
-    M5.Display.wakeup();
-    M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-    M5.Display.drawString("Downloading update...", cx, displayH / 2 - 8);
-    M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-    M5.Display.display();
-    M5.Display.waitDisplay();
+    showOtaStatus("Downloading update...");
 
     WiFiClientSecure sslClient;
     sslClient.setInsecure(); // skip certificate verification for GitHub download
@@ -3093,26 +3090,16 @@ void wifiHandleOtaUpdate() {
         if (pct != lastPct && pct % 10 == 0) {
             lastPct = pct;
             Serial.printf("OTA: %d%%\n", pct);
-            // Update e-ink progress
             char prog[32];
             snprintf(prog, sizeof(prog), "Updating... %d%%", pct);
-            M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-            M5.Display.setTextDatum(top_center);
-            M5.Display.drawString(prog, cx, displayH / 2 - 8);
-            M5.Display.setEpdMode(epd_mode_t::epd_fastest);
-            M5.Display.display();
+            showOtaStatus(prog);
         }
     }
     http.end();
 
     if (Update.end(true)) {
         Serial.println("OTA: Update successful!");
-        // Show success on e-ink
-        M5.Display.fillRect(0, displayH / 2 - 30, displayW, 60, TFT_WHITE);
-        M5.Display.drawString("Update complete! Restarting...", cx, displayH / 2 - 8);
-        M5.Display.setEpdMode(epd_mode_t::epd_quality);
-        M5.Display.display();
-        M5.Display.waitDisplay();
+        showOtaStatus("Update complete! Restarting...");
 
         wifiServer.send(200, "application/json", "{\"success\":true}");
         delay(1000);

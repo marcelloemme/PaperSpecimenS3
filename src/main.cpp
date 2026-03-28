@@ -49,8 +49,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.2.0
-static const char* VERSION = "v5.2.0";
+// PaperSpecimen S3 - v5.2.1
+static const char* VERSION = "v5.2.1";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)

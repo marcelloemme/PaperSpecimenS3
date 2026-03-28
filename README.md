@@ -237,7 +237,7 @@ Renders the glyph's Bézier curves showing the underlying vector structure:
 - **Filled circles**: on-curve control points
 - **Hollow circles**: off-curve control points (quadratic Bézier handles)
 - **Solid lines**: straight segments and Bézier curves (approximated), anti-aliased with Xiaolin Wu algorithm for smooth edges
-- **Dashed lines**: tangent/control lines connecting off-curve points
+- **Dashed lines**: tangent/control lines connecting off-curve points, also anti-aliased
 
 Supports up to 600 outline points and segments per glyph.
 

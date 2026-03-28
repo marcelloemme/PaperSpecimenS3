@@ -1044,33 +1044,64 @@ void drawLineAA(int x0, int y0, int x1, int y1) {
     }
 }
 
+// Dashed line using Xiaolin Wu with per-pixel dash pattern
+// All pixels follow the exact same line path — only visibility toggles
 void drawDashedLine(float x1, float y1, float x2, float y2, uint16_t color) {
-    float dx = x2 - x1;
-    float dy = y2 - y1;
-    float length = sqrtf(dx * dx + dy * dy);
-    if (length < 0.5f) return;
+    int ix1 = (int)roundf(x1), iy1 = (int)roundf(y1);
+    int ix2 = (int)roundf(x2), iy2 = (int)roundf(y2);
 
-    dx /= length;
-    dy /= length;
+    if (ix1 == ix2 && iy1 == iy2) return;
 
-    float dash_length = 10.0f;
-    float gap_length = 5.0f;
-    float distance = 0.0f;
-    bool drawing = true;
+    float totalLen = sqrtf((x2-x1)*(x2-x1) + (y2-y1)*(y2-y1));
+    if (totalLen < 1.0f) return;
 
-    while (distance < length) {
-        float seg_len = drawing ? dash_length : gap_length;
-        float end_dist = distance + seg_len;
-        if (end_dist > length) end_dist = length;
+    float dashLen = 10.0f;
+    float gapLen = 5.0f;
+    float cycleLen = dashLen + gapLen;
 
-        if (drawing) {
-            drawLineAA(
-                (int)roundf(x1 + dx * distance), (int)roundf(y1 + dy * distance),
-                (int)roundf(x1 + dx * end_dist), (int)roundf(y1 + dy * end_dist));
+    bool steep = abs(iy2 - iy1) > abs(ix2 - ix1);
+    if (steep) { std::swap(ix1, iy1); std::swap(ix2, iy2); }
+    if (ix1 > ix2) { std::swap(ix1, ix2); std::swap(iy1, iy2); }
+
+    int dx = ix2 - ix1;
+    int dy = iy2 - iy1;
+    float gradient = (dx == 0) ? 1.0f : (float)dy / (float)dx;
+    float intery = (float)iy1;
+    float pixelsPerUnit = (dx == 0) ? 0 : totalLen / (float)dx;
+
+    for (int x = ix1; x <= ix2; x++) {
+        // Calculate distance along the original line for this pixel
+        float dist = (x - ix1) * pixelsPerUnit;
+        float phase = fmodf(dist, cycleLen);
+        bool visible = (phase < dashLen);
+
+        if (visible) {
+            int iy = (int)intery;
+            float frac = intery - iy;
+
+            uint8_t bright1 = (uint8_t)(frac * 255.0f);
+            uint8_t bright0 = 255 - bright1;
+            uint8_t gray0 = 255 - bright0;
+            uint8_t gray1 = 255 - bright1;
+
+            // Lighten H/V lines (~20% lighter) to match perceived weight of diagonal AA lines
+            if (frac < 0.01f) {
+                gray0 = 102; // 40% lighter than black for H/V lines
+                gray1 = 255; // skip secondary pixel
+            }
+
+            uint16_t c0 = M5.Display.color565(gray0, gray0, gray0);
+            uint16_t c1 = M5.Display.color565(gray1, gray1, gray1);
+
+            if (steep) {
+                if (gray0 < 240) M5.Display.drawPixel(iy, x, c0);
+                if (gray1 < 240) M5.Display.drawPixel(iy + 1, x, c1);
+            } else {
+                if (gray0 < 240) M5.Display.drawPixel(x, iy, c0);
+                if (gray1 < 240) M5.Display.drawPixel(x, iy + 1, c1);
+            }
         }
-
-        distance = end_dist;
-        drawing = !drawing;
+        intery += gradient;
     }
 }
 

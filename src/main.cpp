@@ -2687,11 +2687,27 @@ void runSplashAndSetup() {
         if (config.fontEnabled[i]) { currentFontIndex = i; break; }
     }
 
+    Serial.printf("Loading first font: index=%d, path=%s, fontsInFlash=%d, flashInit=%d\n",
+                  currentFontIndex, fontPaths[currentFontIndex].c_str(), fontsInFlash, flashInitialized);
+
+    // Reset FreeType state completely before first font load
+    if (ftFace) { FT_Done_Face(ftFace); ftFace = nullptr; }
+    if (fontFile) { fontFile.close(); }
+    memset(&fontStream, 0, sizeof(fontStream));
+    // Re-init FreeType library to ensure clean state
+    if (ftLibrary) { FT_Done_FreeType(ftLibrary); ftLibrary = nullptr; }
+    FT_Init_FreeType(&ftLibrary);
+    registerCFFModules(ftLibrary);
+
+    delay(50);
+
     if (loadFontFromStream(currentFontIndex)) {
         isFirstRender = true;
         uint32_t cp = findRandomGlyph();
         drawGlyph(cp);
         M5.Display.waitDisplay();
+    } else {
+        Serial.println("ERROR: First font load failed after setup!");
     }
 
     // Flush any queued touch events (e.g. double-tap on Confirm)

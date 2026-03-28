@@ -974,6 +974,76 @@ bool parseGlyphOutline(uint32_t codepoint) {
 static uint16_t colorOutline;   // dark gray for curves
 static uint16_t colorConstruct; // black for construction lines and points
 
+// Xiaolin Wu anti-aliased line drawing
+// Uses 16 grayscale levels of the e-ink display for smooth edges
+void drawLineAA(int x0, int y0, int x1, int y1) {
+    // Handle trivial cases
+    if (x0 == x1 && y0 == y1) {
+        M5.Display.drawPixel(x0, y0, TFT_BLACK);
+        return;
+    }
+
+    bool steep = abs(y1 - y0) > abs(x1 - x0);
+    if (steep) { std::swap(x0, y0); std::swap(x1, y1); }
+    if (x0 > x1) { std::swap(x0, x1); std::swap(y0, y1); }
+
+    int dx = x1 - x0;
+    int dy = y1 - y0;
+    float gradient = (dx == 0) ? 1.0f : (float)dy / (float)dx;
+
+    // First endpoint
+    float xend = x0;
+    float yend = y0;
+    float intery = yend + gradient;
+
+    // Draw first pixel
+    if (steep) {
+        M5.Display.drawPixel((int)yend, (int)xend, TFT_BLACK);
+    } else {
+        M5.Display.drawPixel((int)xend, (int)yend, TFT_BLACK);
+    }
+
+    // Main loop
+    for (int x = x0 + 1; x < x1; x++) {
+        int iy = (int)intery;
+        float frac = intery - iy;
+
+        // Two pixels per column, weighted by fractional part
+        // frac close to 0 = pixel mostly on iy, frac close to 1 = mostly on iy+1
+        uint8_t bright1 = (uint8_t)(frac * 255.0f);        // brightness of offset pixel
+        uint8_t bright0 = 255 - bright1;                     // brightness of main pixel
+
+        // Convert to gray: 0=white, 255=white on e-ink, we want darker = more ink
+        // gray = 255 - brightness (0=black, 255=white)
+        uint8_t gray0 = 255 - bright0; // main pixel: darker when frac is small
+        uint8_t gray1 = 255 - bright1; // offset pixel: darker when frac is large
+
+        // Clamp to avoid pure white (invisible) — minimum darkness threshold
+        if (gray0 > 240) gray0 = 255; // too light, skip
+        if (gray1 > 240) gray1 = 255;
+
+        uint16_t c0 = M5.Display.color565(gray0, gray0, gray0);
+        uint16_t c1 = M5.Display.color565(gray1, gray1, gray1);
+
+        if (steep) {
+            if (gray0 < 255) M5.Display.drawPixel(iy, x, c0);
+            if (gray1 < 255) M5.Display.drawPixel(iy + 1, x, c1);
+        } else {
+            if (gray0 < 255) M5.Display.drawPixel(x, iy, c0);
+            if (gray1 < 255) M5.Display.drawPixel(x, iy + 1, c1);
+        }
+
+        intery += gradient;
+    }
+
+    // Last pixel
+    if (steep) {
+        M5.Display.drawPixel(y1, x1, TFT_BLACK);
+    } else {
+        M5.Display.drawPixel(x1, y1, TFT_BLACK);
+    }
+}
+
 void drawDashedLine(float x1, float y1, float x2, float y2, uint16_t color) {
     float dx = x2 - x1;
     float dy = y2 - y1;
@@ -994,9 +1064,9 @@ void drawDashedLine(float x1, float y1, float x2, float y2, uint16_t color) {
         if (end_dist > length) end_dist = length;
 
         if (drawing) {
-            M5.Display.drawLine(
+            drawLineAA(
                 (int)(x1 + dx * distance), (int)(y1 + dy * distance),
-                (int)(x1 + dx * end_dist), (int)(y1 + dy * end_dist), color);
+                (int)(x1 + dx * end_dist), (int)(y1 + dy * end_dist));
         }
 
         distance = end_dist;
@@ -1072,7 +1142,7 @@ void drawGlyphOutline(uint32_t charcode) {
                 curr_y = seg.y;
                 break;
             case SEG_LINE:
-                M5.Display.drawLine((int)curr_x, (int)curr_y, (int)seg.x, (int)seg.y, colorOutline);
+                drawLineAA((int)curr_x, (int)curr_y, (int)seg.x, (int)seg.y);
                 curr_x = seg.x;
                 curr_y = seg.y;
                 break;
@@ -1083,7 +1153,7 @@ void drawGlyphOutline(uint32_t charcode) {
                     float u1 = 1.0f - u;
                     float bx = u1*u1*curr_x + 2*u1*u*seg.cx + u*u*seg.x;
                     float by = u1*u1*curr_y + 2*u1*u*seg.cy + u*u*seg.y;
-                    M5.Display.drawLine((int)px, (int)py, (int)bx, (int)by, colorOutline);
+                    drawLineAA((int)px, (int)py, (int)bx, (int)by);
                     px = bx; py = by;
                 }
                 curr_x = seg.x; curr_y = seg.y;
@@ -1096,7 +1166,7 @@ void drawGlyphOutline(uint32_t charcode) {
                     float u1 = 1.0f - u;
                     float bx = u1*u1*u1*curr_x + 3*u1*u1*u*seg.cx + 3*u1*u*u*seg.cx2 + u*u*u*seg.x;
                     float by = u1*u1*u1*curr_y + 3*u1*u1*u*seg.cy + 3*u1*u*u*seg.cy2 + u*u*u*seg.y;
-                    M5.Display.drawLine((int)px, (int)py, (int)bx, (int)by, colorOutline);
+                    drawLineAA((int)px, (int)py, (int)bx, (int)by);
                     px = bx; py = by;
                 }
                 curr_x = seg.x; curr_y = seg.y;

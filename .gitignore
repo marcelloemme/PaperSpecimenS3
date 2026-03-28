@@ -25,3 +25,6 @@ screenlog.*
 # Battery/debug logs on SD (not in repo)
 battery_log.txt
 wake_debug.txt
+
+# Firmware binaries (distributed via GitHub Releases)
+*.bin

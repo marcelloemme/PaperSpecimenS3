@@ -324,6 +324,8 @@ Settings are stored in `/.paperspecimen.cfg` (hidden file) on internal flash or 
 - FreeType stream-based font loading (reads directly from flash/SD, no full-file RAM allocation)
 - Touch polling at 50 Hz (20ms interval)
 - `pushGrayscaleImage` for efficient bitmap transfers (vs pixel-by-pixel)
+- SPI transaction batching for outline rendering (`startWrite`/`endWrite`)
+- Single-pass label rendering using font-global metrics (no redundant rasterization)
 - Blank glyph detection via `FT_LOAD_NO_SCALE` (avoids unnecessary rendering)
 
 ## Refresh Management

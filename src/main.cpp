@@ -49,8 +49,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.2.1
-static const char* VERSION = "v5.2.1";
+// PaperSpecimen S3 - v5.2.2
+static const char* VERSION = "v5.2.2";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -278,14 +278,6 @@ static unsigned long ft_stream_io(FT_Stream stream, unsigned long offset,
     f->seek(offset);
     if (count == 0) return 0; // seek-only call
     return f->read(buffer, count);
-}
-
-// FreeType stream callback: close file
-static void ft_stream_close(FT_Stream stream) {
-    File* f = (File*)stream->descriptor.pointer;
-    if (f && *f) {
-        f->close();
-    }
 }
 
 // Display
@@ -707,29 +699,26 @@ String shortenFTText(const String& text, int maxWidth, int pixSize) {
 }
 
 // Render a string using FreeType at given pixel size, centered at (cx, y)
-// Returns the height used. Uses current ftFace.
+// Single pass: uses font-global ascender/descender for vertical positioning
+// (avoids double-rendering every glyph just to measure per-char metrics)
 void drawFTString(const char* text, int cx, int y, int pixSize, bool bottomAlign) {
     if (!ftFace) return;
 
     FT_Set_Pixel_Sizes(ftFace, 0, pixSize);
 
-    // First pass: measure total width and max ascent/descent
-    // Use FT_LOAD_RENDER directly — gives both advance and bitmap metrics in one call
+    // Measure total width without rasterizing (FT_LOAD_DEFAULT = outline only)
     int totalWidth = 0;
-    int maxAscent = 0;
-    int maxDescent = 0;
     for (const char* p = text; *p; p++) {
         FT_UInt idx = FT_Get_Char_Index(ftFace, (uint8_t)*p);
         if (idx == 0) idx = FT_Get_Char_Index(ftFace, '?');
         if (idx == 0) continue;
-
-        FT_Load_Glyph(ftFace, idx, FT_LOAD_RENDER);
+        FT_Load_Glyph(ftFace, idx, FT_LOAD_DEFAULT);
         totalWidth += ftFace->glyph->advance.x >> 6;
-        int asc = ftFace->glyph->bitmap_top;
-        int desc = (int)ftFace->glyph->bitmap.rows - ftFace->glyph->bitmap_top;
-        if (asc > maxAscent) maxAscent = asc;
-        if (desc > maxDescent) maxDescent = desc;
     }
+
+    // Use font-global ascender/descender (available after FT_Set_Pixel_Sizes)
+    int maxAscent = ftFace->size->metrics.ascender >> 6;
+    int maxDescent = -(ftFace->size->metrics.descender >> 6); // descender is negative
 
     // Calculate start position
     int startX = cx - totalWidth / 2;
@@ -740,7 +729,7 @@ void drawFTString(const char* text, int cx, int y, int pixSize, bool bottomAlign
         baselineY = y + maxAscent;
     }
 
-    // Second pass: render using pushGrayscaleImage per character
+    // Single pass: render using pushGrayscaleImage per character
     {
         int penX = startX;
         for (const char* p = text; *p; p++) {
@@ -1163,6 +1152,9 @@ void drawGlyphOutline(uint32_t charcode) {
 
     M5.Display.fillScreen(TFT_WHITE);
 
+    // Batch all pixel writes in a single SPI transaction for performance
+    M5.Display.startWrite();
+
     // Draw outline curve segments (dark gray)
     float curr_x = 0, curr_y = 0;
     for (int i = 0; i < g_num_segments; i++) {
@@ -1237,6 +1229,8 @@ void drawGlyphOutline(uint32_t charcode) {
             M5.Display.fillSmoothCircle((int)pt.x, (int)pt.y, 4, colorConstruct);
         }
     }
+
+    M5.Display.endWrite();
 
     drawLabels(charcode);
     refreshDisplay();
@@ -2800,6 +2794,7 @@ void wifiHandleFonts() {
 }
 
 void wifiHandleDelete() {
+    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     // Simple JSON parse for {"name":"filename"}
     String body = wifiServer.arg("plain");
@@ -2819,6 +2814,7 @@ void wifiHandleDelete() {
 }
 
 void wifiHandleRename() {
+    wifiLastActivity = millis();
     if (!wifiServer.hasArg("plain")) { wifiServer.send(400, "text/plain", "No body"); return; }
     String body = wifiServer.arg("plain");
     // Parse {"name":"old","newName":"new"}
@@ -3708,7 +3704,7 @@ void setup() {
         // Fall through to loop() for interactive mode + inactivity sleep
     }
 
-    Serial.println("Interactive mode. Inactivity timeout: 60s. Hold center 10s: setup.");
+    Serial.println("Interactive mode. Inactivity timeout: 40s. Hold center 5s: setup.");
 }
 
 // Inactivity timer for sleep
@@ -3723,7 +3719,7 @@ void loop() {
     // Initialize interaction timer on first loop iteration
     if (lastInteraction == 0) lastInteraction = millis();
 
-    // Inactivity sleep: 60s without touch → go to sleep
+    // Inactivity sleep: 40s without touch → go to sleep
     if (millis() - lastInteraction >= INACTIVITY_TIMEOUT_MS) {
         Serial.println("Inactivity timeout — going to sleep");
         goToSleep();

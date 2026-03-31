@@ -49,8 +49,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.2.2
-static const char* VERSION = "v5.2.2";
+// PaperSpecimen S3 - v5.3.0
+static const char* VERSION = "v5.3.0";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -930,10 +930,24 @@ bool parseGlyphOutline(uint32_t codepoint) {
     int centerX = displayW / 2;
     int centerY = displayH / 2;
 
+    // Hybrid centering: blend between bbox center (wide glyphs) and
+    // advance center (narrow glyphs). Width in pixels after scaling.
+    float widthPx = width * scale;
     float bbox_center_x = (bbox.xMin + bbox.xMax) / 2.0f;
-    float bbox_center_y = (bbox.yMin + bbox.yMax) / 2.0f;
+    float bboxOffX = centerX - bbox_center_x * scale;  // pure bbox center
 
-    float offset_x = centerX - bbox_center_x * scale;
+    float advance_x = (float)ftFace->glyph->advance.x; // font units (FT_LOAD_NO_SCALE)
+    float advOffX = centerX - (advance_x / 2.0f) * scale; // advance center
+
+    float advanceFactor; // 0.0 = all bbox, 1.0 = all advance
+    if (widthPx >= 420.0f) advanceFactor = 0.0f;
+    else if (widthPx <= 220.0f) advanceFactor = 1.0f;
+    else advanceFactor = 1.0f - (widthPx - 220.0f) / 200.0f;
+
+    float offset_x = bboxOffX + (advOffX - bboxOffX) * advanceFactor;
+
+    // Vertical: center on bbox (no advance equivalent for vertical)
+    float bbox_center_y = (bbox.yMin + bbox.yMax) / 2.0f;
     float offset_y = centerY + bbox_center_y * scale;
 
     OutlineDecomposeContext ctx = {0, 0, 0, 0, 0, scale, offset_x, offset_y};
@@ -1325,8 +1339,20 @@ void drawGlyph(uint32_t charcode) {
     // Clear display
     M5.Display.fillScreen(TFT_WHITE);
 
-    // Center bitmap on screen
-    int drawX = (displayW - (int)bmp->width) / 2;
+    // Hybrid centering: blend between bbox center (good for wide glyphs)
+    // and advance-based center (good for narrow glyphs with sidebearing).
+    // Narrow glyphs (<=220px) use 100% advance, wide (>=420px) use 100% bbox.
+    int bboxDrawX = (displayW - (int)bmp->width) / 2;  // pure bbox center
+    int advancePx = slot->advance.x >> 6;
+    int advDrawX = (displayW - advancePx) / 2 + slot->bitmap_left; // advance center
+
+    float bmpW = (float)bmp->width;
+    float advanceFactor; // 0.0 = all bbox, 1.0 = all advance
+    if (bmpW >= 420.0f) advanceFactor = 0.0f;
+    else if (bmpW <= 220.0f) advanceFactor = 1.0f;
+    else advanceFactor = 1.0f - (bmpW - 220.0f) / 200.0f;
+
+    int drawX = bboxDrawX + (int)((advDrawX - bboxDrawX) * advanceFactor);
     int drawY = (displayH - (int)bmp->rows) / 2;
 
     // Clamp to display bounds

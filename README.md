@@ -230,7 +230,7 @@ After **40 seconds** of inactivity, the device enters sleep and begins the autom
 ## Rendering Modes
 
 ### Bitmap Mode
-Renders the glyph as a filled shape using FreeType's rasterizer with full 16-level grayscale anti-aliasing. The glyph is displayed at the maximum size that fits nicely the screen (420px on the longest side).
+Renders the glyph as a filled shape using FreeType's rasterizer with full 16-level grayscale anti-aliasing. The glyph is displayed at the maximum size that fits nicely the screen (420px on the longest side). Horizontal centering uses a hybrid approach that blends between bounding-box centering (for wide glyphs) and advance-width centering (for narrow glyphs), producing more optically balanced results — especially for accented characters and punctuation.
 
 ### Outline Mode
 Renders the glyph's Bézier curves showing the underlying vector structure:

@@ -2,6 +2,18 @@
 
 A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). PaperSpecimen S3 loads TrueType (.ttf) and OpenType (.otf/CFF) fonts and displays random glyphs in both bitmap and Bézier outline modes, cycling automatically on a configurable timer. The device works out of the box with 3 built-in fonts — no SD card required. Fonts are automatically cached to internal flash storage (~12 MB) for SD-free operation. Additional fonts can be loaded via SD card or uploaded wirelessly through the built-in WiFi font manager. Designed for ultra-low power consumption — the device sleeps between refreshes and can last up to 2 months on a single charge.
 
+The M5Paper S3 has built-in magnets, making it a smart fridge magnet that automatically refreshes with new typographic specimens throughout the day.
+
+![PaperSpecimen S3 on a fridge](images/fridge.jpg)
+
+| Bitmap mode | Outline mode |
+|:-----------:|:------------:|
+| ![Bitmap rendering](images/bitmap.jpg) | ![Outline rendering](images/outline.jpg) |
+
+| Splash screen | Setup menu |
+|:-------------:|:----------:|
+| ![Splash screen with QR code](images/splash.jpg) | ![Setup configuration](images/setup.jpg) |
+
 
 ## Hardware
 
@@ -15,6 +27,7 @@ A font specimen viewer for the **M5Paper S3** (ESP32-S3, 4.7" e-ink display). Pa
   - MicroSD card slot
   - 1 physical button (power/reset)
   - USB-C for charging and serial debug
+  - Built-in magnets (can be mounted on fridges, whiteboards, etc.)
 
 ## Features
 

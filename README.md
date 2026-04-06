@@ -21,6 +21,10 @@ The M5Paper S3 has built-in magnets, making it a smart fridge magnet that automa
   - USB-C for charging and serial debug
   - Built-in magnets (can be mounted on fridges, whiteboards, etc.)
 
+![PaperSpecimen S3 in direct sunlight](images/outdoor.jpg)
+
+The e-ink display is perfectly readable in direct sunlight — no glare, no washed-out colors. Ideal for hanging on a wall, fridge, or carrying around.
+
 ## Features
 
 - **Dual rendering modes**: bitmap (anti-aliased grayscale) and Bézier outline (control points, curves, tangent lines)

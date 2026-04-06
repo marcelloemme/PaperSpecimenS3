@@ -175,6 +175,9 @@ The first 6 ranges (Basic Latin through IPA Extensions) are enabled by default.
 Tap `> Flip interface` to rotate the entire UI 180°. Useful when wearing the M5Paper S3 on a lanyard (the device hangs upside down). The flip state is saved and persisted across reboots.
 
 ### WiFi Manager
+
+![WiFi Manager](images/wifimanager.jpg)
+
 Tap `> WiFi manager` to launch a wireless manager. The device creates a WiFi access point and serves a web-based interface for managing fonts and updating firmware without removing the SD card:
 
 - **SSID**: `PaperSpecimenS3`

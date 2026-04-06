@@ -6,14 +6,6 @@ The M5Paper S3 has built-in magnets, making it a smart fridge magnet that automa
 
 ![PaperSpecimen S3 on a fridge](images/fridge.jpg)
 
-| Bitmap mode | Outline mode |
-|:-----------:|:------------:|
-| ![Bitmap rendering](images/bitmap.jpg) | ![Outline rendering](images/outline.jpg) |
-
-| Splash screen | Setup menu |
-|:-------------:|:----------:|
-| ![Splash screen with QR code](images/splash.jpg) | ![Setup configuration](images/setup.jpg) |
-
 
 ## Hardware
 
@@ -101,6 +93,8 @@ pio device monitor
 
 ## First Boot
 
+![Splash screen](images/splash.jpg)
+
 1. **Splash screen** appears for 5 seconds showing a QR code linking to this repository
 2. The **setup screen** is displayed with configuration options
 3. Configure your preferences (see Configuration below)
@@ -117,6 +111,8 @@ During the 5-second splash screen, tap the screen **4 or more times** to activat
 In normal mode, serial output and battery log are disabled to save power. In debug mode without an SD card, the battery percentage is shown on screen next to the codepoint but no log file is written — this provides a more accurate battery drain measurement for SD-free operation.
 
 ## Configuration
+
+![Setup menu](images/setup.jpg)
 
 The setup screen provides the following options:
 
@@ -243,9 +239,15 @@ After **40 seconds** of inactivity, the device enters sleep and begins the autom
 ## Rendering Modes
 
 ### Bitmap Mode
+
+![Bitmap mode](images/bitmap.jpg)
+
 Renders the glyph as a filled shape using FreeType's rasterizer with full 16-level grayscale anti-aliasing. The glyph is displayed at the maximum size that fits nicely the screen (420px on the longest side). Horizontal centering uses a hybrid approach that blends between bounding-box centering (for wide glyphs) and advance-width centering (for narrow glyphs), producing more optically balanced results — especially for accented characters and punctuation.
 
 ### Outline Mode
+
+![Outline mode](images/outline.jpg)
+
 Renders the glyph's Bézier curves showing the underlying vector structure:
 - **Filled circles**: on-curve control points
 - **Hollow circles**: off-curve control points (quadratic Bézier handles)

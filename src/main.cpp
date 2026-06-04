@@ -49,8 +49,8 @@ static void registerCFFModules(FT_Library lib) {
     Serial.println("CFF/OTF modules registered");
 }
 
-// PaperSpecimen S3 - v5.3.0
-static const char* VERSION = "v5.3.0";
+// PaperSpecimen S3 - v5.3.1
+static const char* VERSION = "v5.3.1";
 
 // Flash font storage threshold (11.5MB)
 #define FLASH_FONT_MAX_BYTES (11.5 * 1024 * 1024)
@@ -636,7 +636,13 @@ int calculatePixelSize(uint32_t charcode) {
 
     int pixelSize = (int)((TARGET_GLYPH_SIZE * (float)ftFace->units_per_EM) / maxDim);
     if (pixelSize < 1) pixelSize = 1;
-    if (pixelSize > 2000) pixelSize = 2000;
+    // Upper clamp guards against pathological bboxes (corrupt fonts). It must
+    // stay well above the legitimate worst case: tiny glyphs like U+002E (the
+    // dot) have maxDim ~10% of the EM, needing pixelSize ~4200 to reach 420px.
+    // The old 2000 cap silently halved the dot in bitmap mode (outline mode,
+    // which scales continuously, was unaffected). The rendered bitmap stays
+    // ~420px regardless: only the glyph is rasterized, not the whole EM.
+    if (pixelSize > 10000) pixelSize = 10000;
 
     Serial.printf("Glyph bbox: w=%.0f h=%.0f, upm=%d, pixel_size=%d\n",
                   width, height, ftFace->units_per_EM, pixelSize);
